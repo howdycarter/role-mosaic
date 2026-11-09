@@ -167,7 +167,7 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
     await adapter.submit(inspection);
     const receipt=await adapter.confirm(inspection);
     if(receipt?.confirmed===true&&receipt.text&&samePosting(receipt.posting,packet.job.url)){
-     attempt.status='submitted';attempt.receipt={...receipt,verifiedAt:now().toISOString(),resumeSha256:ctx.resumeSha256};await save();
+     attempt.status='submitted';attempt.reason=null;attempt.receipt={...receipt,verifiedAt:now().toISOString(),resumeSha256:ctx.resumeSha256};await save();
      const history=await store.read('history.json',[]);history.push({company:packet.job.company,role:packet.job.title,posting:packet.job.url,status:'submitted',submittedAt:now().toISOString(),receiptId:attempt.id});await store.write('history.json',history);
      const jobs=await store.read('jobs.json',[]),job=jobs.find(j=>j.id===packet.job.id);if(job){job.status='applied';job.receiptId=attempt.id;await store.write('jobs.json',jobs);}
     }else{attempt.reason='No employer confirmation observed; reconciliation required';await save();}
@@ -198,7 +198,7 @@ export async function reconcileApplications({home,adapter,now=()=>new Date()}) {
     const inspection=attempt.status==='submitted'?null:await adapter.inspect(job,{tabId:attempt.tabId});
     const receipt=attempt.status==='submitted'?attempt.receipt:await adapter.confirm(inspection);
     if(!receipt?.confirmed||!receipt.text||!samePosting(receipt.posting,attempt.url)){results.push({jobId:attempt.jobId,status:'submission_unknown'});continue;}
-    attempt.status='submitted';attempt.receipt={...receipt,verifiedAt:now().toISOString(),resumeSha256:attempt.resumeSha256};attempt.updatedAt=now().toISOString();await store.write('application-ledger.json',ledger);
+    attempt.status='submitted';attempt.reason=null;attempt.receipt={...receipt,verifiedAt:now().toISOString(),resumeSha256:attempt.resumeSha256};attempt.updatedAt=now().toISOString();await store.write('application-ledger.json',ledger);
     const history=await store.read('history.json',[]);if(!history.some(r=>r.receiptId===attempt.id)){history.push({company:attempt.company,role:attempt.title,posting:attempt.url,status:'submitted',submittedAt:now().toISOString(),receiptId:attempt.id});await store.write('history.json',history);}
     const jobs=await store.read('jobs.json',[]),jobRecord=jobs.find(j=>j.id===attempt.jobId);if(jobRecord){jobRecord.status='applied';jobRecord.receiptId=attempt.id;await store.write('jobs.json',jobs);}
     results.push({jobId:attempt.jobId,status:'submitted'});

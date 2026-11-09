@@ -93,7 +93,7 @@ test('receipt-only recovery records delayed employer confirmation without fillin
   f.adapter.confirm=async()=>({confirmed:true,posting:f.job.url+'/confirmation',text:'We have received your application'});
   const {reconcileApplications}=await import('../src/applications.js');
   const result=await reconcileApplications({home:f.root,adapter:f.adapter,now});
-  assert.equal(result[0].status,'submitted');assert.deepEqual(f.events,['fill','submit']);
+  assert.equal(result[0].status,'submitted');assert.equal((await f.store.read('application-ledger.json',[]))[0].reason,null);assert.deepEqual(f.events,['fill','submit']);
   await reconcileApplications({home:f.root,adapter:f.adapter,now});
   assert.equal((await f.store.read('history.json',[])).length,1);assert.deepEqual(f.events,['fill','submit']);
  }finally{await f.close();}
