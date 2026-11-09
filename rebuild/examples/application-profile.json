@@ -1,0 +1,23 @@
+{
+  "verified": false,
+  "facts": {
+    "firstName": "",
+    "lastName": "",
+    "fullName": "",
+    "preferredName": "",
+    "email": "",
+    "phone": "",
+    "country": "",
+    "city": "",
+    "state": "",
+    "stateCode": "",
+    "postalCode": "",
+    "linkedin": "",
+    "github": "",
+    "website": "",
+    "currentCompany": "",
+    "authorizedUS": null,
+    "requiresSponsorshipUS": null
+  },
+  "answers": []
+}

@@ -2,7 +2,7 @@
 
 A local-first job-search workspace. Bring your own résumé, career history, search rules, employer boards, and application records. Applicant data stays in your private local workspace and is not included in this repository.
 
-**Start with the independent rebuild in [`rebuild/`](rebuild/README.md).** It has a local dashboard, configurable public-board discovery, rule-based matching, history checks, and an optional Notion career-history snapshot. It needs Node.js 22+ and no API key or AI subscription. There is no unattended application adapter: it finds and organizes opportunities; applications need a separate reviewed workflow. A tracking status is not a submission receipt.
+**Start with the independent rebuild in [`rebuild/`](rebuild/README.md).** It has a local dashboard, configurable public-board discovery, rule-based matching, history checks, and an optional Notion career-history snapshot. It needs Node.js 22+ and no API key or AI subscription. It can also fill, submit and verify supported one-page applications through the connected Codex Browser, after recipient-specific packet approval. CAPTCHA, accounts, unknown facts and uncertain outcomes are held. It is not an unattended scheduler. A tracking status is not a submission receipt. See [application setup](docs/APPLICATIONS.md).
 
 ## Quick start for a new applicant
 
@@ -38,8 +38,8 @@ To connect your own Notion page, export or retrieve its Markdown and run `connec
 - Each applicant initializes their own workspace; no real applicant profile, résumé, Notion document, search history, or credential is shipped.
 - Private runtime files, generated documents, application records, and environment files are git-ignored. An ignore rule cannot remove data that was already committed.
 - Run `npm run check:privacy` from the repository root and review `git diff --cached` before publishing. CI checks the committed tree for forbidden applicant paths and credential patterns.
-- The rebuild contacts public employer APIs during discovery. It does not upload your résumé or profile to an AI provider or employer.
-- Résumé approval, application verification, CAPTCHA completion, and actual submission receipts are distinct steps. Automatic submissions and scheduling are not implemented in the rebuild.
+- Discovery and career import do not upload applicant documents. The optional, authorized Browser application workflow transmits the approved fields and PDF to the selected employer; it does not use JEV or OpenRouter.
+- Résumé approval, application verification, CAPTCHA completion, and actual submission receipts are distinct steps. Supported Browser submissions use the guarded packet workflow. Unattended scheduling and universal ATS support are not implemented.
 
 ## Legacy CLI setup
 

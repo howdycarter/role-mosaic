@@ -2,7 +2,7 @@
 
 A local job-search workspace with public employer-board discovery, configurable rule matching, application-history checks, and a browser dashboard. Requires **Node.js 22+**. The independent core has **no dependencies to install, API key, AI subscription, or account requirement**. Run the commands below from `rebuild/`.
 
-It finds and organizes jobs. Automatic applications, scheduling, authenticated Notion sync, semantic résumé matching, and verified employer receipts are not implemented. Tracking a job as “applied” does not submit it.
+It finds and organizes jobs. Optional [Browser-driven applications](../docs/APPLICATIONS.md) can fill, submit and verify supported one-page forms after specific packet authorization. Unattended scheduling, universal ATS support, authenticated Notion sync and semantic résumé matching are not implemented. Tracking a job as “applied” does not submit it.
 
 ## 1. Create your private workspace
 
@@ -101,6 +101,10 @@ Edit the files inside your private workspace:
 A board entry looks like `{"type":"greenhouse","slug":"example","company":"Example"}`; `example` is a placeholder. `examples/boards.json` contains real public boards to try. Optional `--search rules.json` and `--boards boards.json` accept your files during setup.
 
 Location screening currently supports US remote work and configured local cities. Other markets require implementation. Salary extraction is heuristic; verify geography, currency, base versus total compensation, and the employer's current posting. Scores reflect rules, not interview probability or a full assessment of your qualifications.
+
+## Optional guarded applications
+
+Follow [application setup](../docs/APPLICATIONS.md) after reviewing your external PDF and application facts. Use `approve-resume`, `configure-applications` and the connected Codex Browser to prepare, authorize, execute and reconcile specific applications. Preparation does not enter personal data. Limits are 1–15 attempts/day plus your budget in your chosen timezone. Unknown required answers, sign-in, CAPTCHA and uncertain submissions stop safely.
 
 ## 4. Discover and use the dashboard
 

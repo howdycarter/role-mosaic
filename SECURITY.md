@@ -22,7 +22,8 @@ Report those to their owners.
 
 - Reads `data/profile.json` and the resume locally; both are git-ignored.
 - The independent `rebuild/` core retrieves public employer boards; it does
-  not send applicant documents or facts to AI services or employers.
+  not send applicant documents or facts during discovery. The opt-in Browser
+  application runner transmits only authorized fields/PDFs to selected employers.
 - The legacy CLI can send job text and profile facts to OpenRouter's
   Decisions API for rating and form mapping. Browser fills can transmit data
   to employers before final submission; review that disclosure first.
@@ -49,3 +50,11 @@ Spreadsheet CSV outputs prefix formula-leading cells with a text apostrophe, inc
 Legacy inbox classification suggests outcomes; matched email text is not authenticated employer identity or proof of submission. Review messages before accepting outcomes. Dry and review-only runs stop before ambiguous Next/Continue actions, which may submit an application regardless of their label.
 
 Submission-capable navigation now journals `submission_unknown` before clicking. A browser failure or ambiguous result holds that state, keeps the tab available for reconciliation, and prevents automatic retries. Only a verified outcome or an explicit review can settle it.
+
+## Independent application runner
+
+The optional Browser driver and `application-*` state are covered by this policy. It requires verified application facts, exact PDF approval, immutable recipient-specific packet approval, current posting/form checks, rule and history gates, a 1–15/day reservation limit and a declared-cost budget. Serial execution holds a workspace lock. Applicant fields and PDFs are transmitted only after packet authorization. The built-in Browser driver uses no AI provider calls.
+
+Unknown required facts, consents, accounts, CAPTCHA, unsafe/unsupported controls, mismatched readback and changed configuration cause holds. Sensitive readback redactions require actual visual evidence; generic expected values are not proof. A durable submission_unknown journal precedes final Submit. No automatic retries occur after uncertain submissions. Receipt confirmation requires matching HTTPS origin/posting identity, explicit employer success text, and the application controls to be gone. Reconciliation never clicks Submit. Confirmed receipts remain confirmed if a subsequent local history write fails.
+
+Private applicant files, screenshots, packets, approvals and ledgers remain ignored. This is a local single-user Browser integration, not a hosted multi-tenant service or universal ATS bot. Browser/account security and the need for action-time confirmation remain distinct from engine configuration.

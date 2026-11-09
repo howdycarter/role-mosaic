@@ -5,12 +5,19 @@ import { fetchBoard } from './sources.js';
 import { evaluate, mergeJobs, historyMatch } from './core.js';
 import { initialize, connectNotion, attachResume, options } from './onboarding.js';
 import { importCareer, renderCareer } from './career.js';
+import { approveResume, configureApplications } from './applications.js';
 const [cmd='help',...args] = process.argv.slice(2);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function main() {
  if(cmd==='init') {
   const result=await initialize(options(args,['resume','career','search','boards','profile']));
   console.log(`Applicant workspace created at ${result.home}. ${result.boards} boards configured. Review search.json and career-review.html in that workspace before discovery. No AI calls or applications were made.`);
+ } else if(cmd==='approve-resume') {
+  const result=await approveResume({home,...options(args,['confirm'])});console.log('Exact external PDF approved: '+result.sha256);
+ } else if(cmd==='configure-applications') {
+  const o=options(args,['profile','max-per-day','daily-budget','timezone','confirm']);
+  if(!o.profile)throw Error('Provide --profile FILE with your verified application facts');
+  const result=await configureApplications({home,profileFile:o.profile,maxPerDay:Number(o['max-per-day']||15),dailyBudgetUsd:Number(o['daily-budget']||1),timezone:o.timezone||'America/Chicago',confirm:o.confirm});console.log('Application policy configured: '+JSON.stringify(result)+'. Prepare and authorize exact packets through the connected Browser.');
  } else if(cmd==='import-career') {
   const result=await importCareer(options(args,['file','label']));
   console.log(`Career sources: ${result.sources}; structured roles: ${result.roles}. ${result.duplicate?'Duplicate skipped. ':''}Review career-review.html and edit career-notes.md. Nothing is approved or submitted.`);
@@ -48,9 +55,12 @@ async function main() {
   const cards=sorted.map(j=>`<article><h2>${esc(j.title)}</h2><p>${esc(j.company)} · ${esc(j.location)}</p><p><strong>${j.fit.score}/100</strong> · ${esc(j.status)}${j.previous?' · Possible previous application':''}</p><p>${esc(j.fit.reasons.join('; ')||'Title and location match')} · ${esc(j.source)}</p>${/^https:\/\//i.test(j.url)?`<a href="${esc(j.url)}" rel="noreferrer">Open employer posting</a>`:'Posting URL needs review'}</article>`).join('');
   const html=`<!doctype html><html lang="en"><meta charset="utf-8"><title>RoleMosaic report</title><meta name="viewport" content="width=device-width"><style>body{font:16px system-ui;max-width:900px;margin:3rem auto;padding:0 1rem;color:#182538;background:#f6f8fb}article{background:white;border:1px solid #dae1eb;border-radius:12px;padding:1rem 1.5rem;margin:1rem 0}h2{font-size:1.2rem}a{color:#1454b8}</style><h1>RoleMosaic</h1><p>${sorted.length} saved listings. Verify posting, compensation and history; listings may have closed.</p>${cards||'<p>No listings yet.</p>'}</html>`;
   const file=path.join(home,'report.html'); await writeFile(file,html,{mode:0o600}); console.log(`Report: ${file}`);
+ } else if(cmd==='applications') {
+  const ledger=await read('application-ledger.json',[]),plan=await read('application-plan.json',{packets:[],held:[]});
+  console.log(JSON.stringify({prepared:plan.packets.length,heldBeforeFill:plan.held.length,submitted:ledger.filter(a=>a.status==='submitted').length,unknown:ledger.filter(a=>a.status==='submission_unknown').length,held:ledger.filter(a=>a.status==='held').length},null,2));
  } else if(cmd==='status') {
   const [jobs,history,c]=await Promise.all([read('jobs.json',[]),read('history.json',[]),read('connections.json',null)]);
-  console.log(`${jobs.length} saved jobs, ${history.length} imported history entries, ${c?.boards?.length||0} boards. Automatic application is not implemented.`);
+  console.log(`${jobs.length} saved jobs, ${history.length} imported history entries, ${c?.boards?.length||0} boards. Browser application packets, authorization and receipts: npm start -- applications. Live execution requires the connected Codex Browser driver.`);
  } else if(cmd==='list') {
   for(const j of await read('jobs.json',[])) console.log(`${j.id} | ${j.status} | ${j.company} | ${j.title} | ${j.location}`);
  } else if(cmd==='mark') {
@@ -59,6 +69,6 @@ async function main() {
   const jobs=await read('jobs.json',[]), matches=jobs.filter(j=>j.id.startsWith(id||''));
   if(!id||matches.length!==1) throw Error('Provide a unique job ID prefix');
   matches[0].status=status; if(note.length) matches[0].note=note.join(' '); matches[0].updatedAt=new Date().toISOString(); await write('jobs.json',jobs); console.log(`Updated ${id} to ${status}.`);
- } else console.log('RoleMosaic rebuild: init [--resume PDF | --career FILE] [--search FILE] [--boards FILE] [--profile FILE], import-career --file FILE [--label NAME], career-review, attach-resume --file PDF, connect-notion --file FILE --url URL, import-legacy [path], discover, report, list, mark ID STATUS [NOTE], status');
+ } else console.log('RoleMosaic rebuild: init [--resume PDF | --career FILE] [--search FILE] [--boards FILE] [--profile FILE], import-career --file FILE [--label NAME], career-review, approve-resume --confirm reviewed, configure-applications --profile FILE --confirm reviewed, attach-resume --file PDF, connect-notion --file FILE --url URL, import-legacy [path], discover, report, list, mark ID STATUS [NOTE], applications, status');
 }
 main().catch(e=>{console.error(`Error: ${e.message}`); process.exitCode=1;});
