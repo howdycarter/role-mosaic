@@ -11,6 +11,10 @@ test('source rejects bad boards and maps greenhouse results',async()=>{await ass
 
 test('job identity retains greenhouse query IDs',()=>{assert.notEqual(identity({...job,url:'https://example.com/?gh_jid=1'}),identity({...job,url:'https://example.com/?gh_jid=2'}));});
 test('unknown salary cannot match',()=>{assert.equal(evaluate({...job,compensation:null},config).disposition,'review');});
+test('unconfigured salary and unrelated legal leadership never enter the match queue',()=>{
+ assert.equal(evaluate(job,{...config,minAnnualBaseUsd:null}).disposition,'review');
+ assert.equal(evaluate({...job,title:'Vice President, Deputy General Counsel, Product'}, {...config,titleLevels:['Vice President']}).disposition,'review');
+});
 
 test('excluded employers and base floors stay out of match set',()=>{
  assert.equal(evaluate({...job,company:'Excluded'}, {...config,excludeEmployers:['Excluded']}).disposition,'review');

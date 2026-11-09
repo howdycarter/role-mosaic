@@ -7,6 +7,7 @@ export function canonical(raw) {
 }
 export function identity(job) { return createHash('sha256').update(job.url ? canonical(job.url) : `${job.company}|${job.title}|${job.location}`).digest('hex').slice(0,20); }
 export function compensation(job, config) {
+ if (!Number.isFinite(config.minAnnualBaseUsd) || config.minAnnualBaseUsd < 0) return {pass:false,reason:'Configure your annual USD base salary floor'};
  const c=job.compensation;
  if (!c || c.currency!=='USD' || c.interval!=='year' || !Number.isFinite(c.min)) return {pass:false,reason:'Annual USD base compensation needs verification'};
  return {pass:c.min>=config.minAnnualBaseUsd,reason:c.min>=config.minAnnualBaseUsd?'Published base range meets floor':'Published base range starts below salary floor'};
@@ -20,6 +21,7 @@ export function evaluate(job, config) {
  if(!fields.length) reasons.push('Title does not match selected field');
  if(!local.length&&!remote) reasons.push('Location needs review');
  if(/\b(intern|internship|unpaid)\b/i.test(job.title)) reasons.push('Excluded title');
+ if(/\b(counsel|attorney|litigation|people partners?|product marketing|product sales|field sales|construction|product finance)\b/i.test(job.title)) reasons.push('Title belongs to a different profession or function');
  if((config.excludeEmployers||[]).some(x=>job.company.toLowerCase().includes(x.toLowerCase()))) reasons.push('Excluded employer');
  const pay=compensation(job,config); if(!pay.pass) reasons.push(pay.reason);
  const score=(levels.length?30:0)+(fields.length?30:0)+(local.length||remote?20:0)+(pay.pass?20:0);

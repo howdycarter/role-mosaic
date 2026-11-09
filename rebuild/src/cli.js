@@ -3,10 +3,17 @@ import path from 'node:path';
 import { home, read, write } from './store.js';
 import { fetchBoard } from './sources.js';
 import { evaluate, mergeJobs, historyMatch } from './core.js';
+import { initialize, connectNotion, options } from './onboarding.js';
 const [cmd='help',...args] = process.argv.slice(2);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function main() {
- if(cmd==='import-legacy') {
+ if(cmd==='init') {
+  const result=await initialize(options(args,['resume','search','boards','profile']));
+  console.log(`Applicant workspace created at ${result.home}. ${result.boards} boards configured. Review private/search.json before discovery. No AI calls or applications were made.`);
+ } else if(cmd==='connect-notion') {
+  await connectNotion(options(args,['file','url','title']));
+  console.log('Private Notion career-history snapshot saved. This is not automatic synchronization or resume approval.');
+ } else if(cmd==='import-legacy') {
   const root=path.resolve(args[0]||'..');
   const search=JSON.parse(await readFile(path.join(root,'data/search.json'),'utf8'));
   const history=JSON.parse(await readFile(path.join(root,'data/history/applications.json'),'utf8'));
@@ -43,6 +50,6 @@ async function main() {
   const jobs=await read('jobs.json',[]), matches=jobs.filter(j=>j.id.startsWith(id||''));
   if(!id||matches.length!==1) throw Error('Provide a unique job ID prefix');
   matches[0].status=status; if(note.length) matches[0].note=note.join(' '); matches[0].updatedAt=new Date().toISOString(); await write('jobs.json',jobs); console.log(`Updated ${id} to ${status}.`);
- } else console.log('RoleMosaic rebuild: import-legacy [path], discover, report, list, mark ID STATUS [NOTE], status');
+ } else console.log('RoleMosaic rebuild: init --resume FILE [--search FILE] [--boards FILE] [--profile FILE], connect-notion --file FILE --url URL, import-legacy [path], discover, report, list, mark ID STATUS [NOTE], status');
 }
 main().catch(e=>{console.error(`Error: ${e.message}`); process.exitCode=1;});

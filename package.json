@@ -25,7 +25,9 @@
     "test:watch": "vitest",
     "check-types": "tsc --noEmit",
     "audit": "npm audit --omit=dev",
-    "setup-applicant": "node scripts/setup-applicant.mjs"
+    "setup-applicant": "node scripts/setup-applicant.mjs",
+    "check:privacy": "node scripts/check-public-data.mjs",
+    "test:rebuild": "node --test rebuild/test/*.test.js"
   },
   "dependencies": {
     "commander": "^15.0.0",

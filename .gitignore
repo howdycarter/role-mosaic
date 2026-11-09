@@ -41,3 +41,13 @@ data/search.json
 data/history/
 data/profile.draft.json
 data/sources.local.json
+
+# Applicant workspaces, generated exports, and review artifacts
+private/
+output/
+outputs/
+tmp/
+*.pdf
+*.doc
+*.docx
+*.rtf

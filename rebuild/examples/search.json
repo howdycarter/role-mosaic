@@ -1,0 +1,9 @@
+{
+  "titleLevels": ["director", "vp", "head"],
+  "titleFields": ["product", "engineering", "design"],
+  "localCities": [],
+  "remoteCountry": "United States",
+  "minAnnualBaseUsd": null,
+  "excludeEmployers": [],
+  "targetTracks": ["product", "engineering", "design"]
+}

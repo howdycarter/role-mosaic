@@ -1,10 +1,41 @@
 # RoleMosaic
 
-A local-first job-search assistant adapted from [qbeka/jev-job-search](https://github.com/qbeka/jev-job-search) (MIT). Applicants bring their own résumé, profile, search criteria, and OpenRouter key. The original upstream documentation follows below; where it differs, this section describes this edition.
+A local-first job-search workspace. Bring your own résumé, career history, search rules, employer boards, and application records. Applicant data stays in your private local workspace and is not included in this repository.
 
-**Status:** Experimental. Leadership-mode submission is intentionally blocked while duplicate prevention, compensation checks, and résumé selection are completed. Do not rely on it for unattended applications. This edition currently supports US-focused location screening; other markets need additional implementation. Codex can help edit and run the project, but the current answer writer still uses Claude Code or the Claude API.
+**Start with the independent rebuild in [`rebuild/`](rebuild/README.md).** It has a local dashboard, configurable public-board discovery, rule-based matching, history checks, and an optional Notion career-history snapshot. It needs Node.js 22+ and no API key or AI subscription. There is no unattended application adapter: it finds and organizes opportunities; applications need a separate reviewed workflow. A tracking status is not a submission receipt.
 
-## Set up your own search
+## Quick start for a new applicant
+
+```bash
+git clone https://github.com/howdycarter/role-mosaic.git
+cd role-mosaic/rebuild
+npm start -- init --resume /absolute/path/to/your-resume.pdf --search examples/search.json --boards examples/boards.json
+```
+
+Edit `private/search.json` with your own title levels, disciplines, locations, exclusions, and annual base salary floor. The default floor is unset and must be chosen before a listing can pass the matching checks. Edit `private/connections.json` to choose public employer boards, then run:
+
+```bash
+npm start -- discover
+npm run app
+```
+
+Open http://127.0.0.1:4317. The core supports Greenhouse, Lever, and Ashby boards. Location screening currently supports US remote work and configured local cities; other markets need additional implementation. Salary extraction and imported history are conservative heuristics, not a professional-fit assessment or live applicant-tracking integration. Inspect the employer posting before acting.
+
+To connect your own Notion page, export or retrieve its Markdown and run `connect-notion --file /path/to/career.md --url https://www.notion.so/your-page` from the rebuild directory. This is an explicit snapshot import, not automatic synchronization. See the [setup guide](rebuild/README.md) for profile import, multiple workspaces, commands, and limitations.
+
+## Public code, private applicant data
+
+- Each applicant initializes their own workspace; no real applicant profile, résumé, Notion document, search history, or credential is shipped.
+- Private runtime files, generated documents, application records, and environment files are git-ignored. An ignore rule cannot remove data that was already committed.
+- Run `npm run check:privacy` from the repository root and review `git diff --cached` before publishing. CI checks the committed tree for forbidden applicant paths and credential patterns.
+- The rebuild contacts public employer APIs during discovery. It does not upload your résumé or profile to an AI provider or employer.
+- Résumé approval, application verification, CAPTCHA completion, and actual submission receipts are distinct steps. Automatic submissions and scheduling are not implemented in the rebuild.
+
+## Legacy CLI setup
+
+The earlier fork of [qbeka/jev-job-search](https://github.com/qbeka/jev-job-search) remains in the root directory with its MIT attribution. It is a separate implementation with additional dependencies and different data flows. Its historical documentation and performance claims below describe upstream, not the independent rebuild.
+
+**Legacy leadership mode is experimental and submission remains blocked.** Codex can help edit and run the project, but the legacy answer writer still uses Claude Code or the Claude API.
 
 1. Install Node.js 22+, Google Chrome, and Claude Code (or configure the Claude API as described below). Clone this repository and run `npm install`.
 2. Run `npm run setup-applicant -- /absolute/path/to/resume.pdf`. This copies your PDF into `documents/resume.pdf`, creates an incomplete `data/profile.draft.json` and a sample `data/search.json`, and does not contact job boards or submit anything. Existing résumé and configuration files are not overwritten.
@@ -16,7 +47,7 @@ A local-first job-search assistant adapted from [qbeka/jev-job-search](https://g
 
 Your `.env`, résumé, profile, history, queue, and application records are git-ignored. Keep them private and check `git status` before publishing. The checked-in examples contain placeholders or fictional data; they are not usable applicant profiles.
 
-**Other applicants:** This repository does not currently offer a Notion integration, a self-service graphical onboarding flow, or a live shared tracker. Import your own facts and records locally. The original student-focused sources remain in the discovery pipeline, so assess results critically. Workday, other account-based sites, and automatic submission remain limited.
+The legacy CLI does not share the rebuild's Notion snapshot view or standalone onboarding. Its student-focused sources remain in its discovery pipeline. Workday, account-based sites, and automatic submission remain limited. Import your own facts and records; never use the fictional example person for an actual application.
 
 ---
 

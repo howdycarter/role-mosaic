@@ -73,7 +73,7 @@ important choices:
   fit rating, so say what you want, where, and when.
 
 Then put your resume at `documents/resume.pdf` and set `resume.path` to
-its absolute path, for example `/Users/you/jev-job-search/documents/resume.pdf`.
+its absolute path, for example `/absolute/path/to/role-mosaic/documents/resume.pdf`.
 
 Check it: `npx jev doctor` reads the profile and the resume; a
 schema error names the field to fix.

@@ -274,8 +274,8 @@ describe("the schedule", () => {
   });
 
   it("writes a LaunchAgent that runs `jev daily` in the project folder, and nothing more", () => {
-    const text = agentPlist({ node: "/usr/local/bin/node", root: "/Users/someone/jev & co", hour: 9, minute: 5, searchPath: "/usr/bin:/bin", log: "/tmp/daily.log" });
-    expect(text).toContain("<string>/usr/local/bin/node</string><string>/Users/someone/jev &amp; co/bin/jev.js</string><string>daily</string>");
+    const text = agentPlist({ node: "/usr/local/bin/node", root: "/tmp/jev & co", hour: 9, minute: 5, searchPath: "/usr/bin:/bin", log: "/tmp/daily.log" });
+    expect(text).toContain("<string>/usr/local/bin/node</string><string>/tmp/jev &amp; co/bin/jev.js</string><string>daily</string>");
     expect(text).toContain("<key>Hour</key><integer>9</integer><key>Minute</key><integer>5</integer>");
     expect(text).toContain("<key>RunAtLoad</key><false/>");
     expect(text).not.toMatch(/--submit|KEY|TOKEN|PASSWORD/);

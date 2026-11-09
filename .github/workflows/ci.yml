@@ -28,6 +28,8 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npx vitest run
+      - run: npm run test:rebuild
+      - run: node scripts/check-public-data.mjs --ref HEAD
       - run: npm audit --omit=dev --audit-level=high
       - name: no personal data or keys in tracked files
         run: |

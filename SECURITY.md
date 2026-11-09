@@ -3,7 +3,7 @@
 ## Reporting
 
 Use GitHub's private vulnerability reporting:
-https://github.com/qbeka/jev-job-search/security/advisories/new.
+https://github.com/howdycarter/role-mosaic/security/advisories/new.
 Do not open a public issue for anything that involves personal data, API
 keys, or a way to make the tool submit something a user did not intend.
 Expect a reply within a week.
@@ -21,13 +21,18 @@ Report those to their owners.
 ## What the tool does with data
 
 - Reads `data/profile.json` and the resume locally; both are git-ignored.
-- Sends job text and the profile's facts to OpenRouter's Decisions API for
-  rating and form mapping. Nothing is sent anywhere else and there is no
-  telemetry.
+- The independent `rebuild/` core retrieves public employer boards; it does
+  not send applicant documents or facts to AI services or employers.
+- The legacy CLI can send job text and profile facts to OpenRouter's
+  Decisions API for rating and form mapping. Browser fills can transmit data
+  to employers before final submission; review that disclosure first.
 - Writes form values into pages in the user's own browser session.
 - Logs JEV usage (ids, token counts, cost) to `data/runs/`, never content.
 
 See `docs/SAFETY.md` for the full list of rules and the pre-publish checks.
+Use `npm run check:privacy` and inspect the staged diff before publishing.
+Applicant configuration, Notion exports, résumés, history, receipts, and
+credentials belong in ignored local storage, not public issues or commits.
 
 ## Supported versions
 
