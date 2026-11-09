@@ -1,4 +1,4 @@
-# Jev Job Search — configurable edition
+# RoleMosaic
 
 A local-first job-search assistant adapted from [qbeka/jev-job-search](https://github.com/qbeka/jev-job-search) (MIT). Applicants bring their own résumé, profile, search criteria, and OpenRouter key. The original upstream documentation follows below; where it differs, this section describes this edition.
 
@@ -20,7 +20,7 @@ Your `.env`, résumé, profile, history, queue, and application records are git-
 
 ---
 
-# jev-job-search
+# Original upstream documentation: jev-job-search
 
 *The job search that fills the forms for you.*
 
@@ -80,8 +80,8 @@ Four checks are built into the code. Your right to work, your education and your
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/qbeka/jev-job-search
-cd jev-job-search
+git clone https://github.com/howdycarter/role-mosaic
+cd role-mosaic
 npm install
 ```
 
