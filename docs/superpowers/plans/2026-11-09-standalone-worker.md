@@ -14,7 +14,7 @@
 - [x] Worker: bounded board discovery and candidate inspection; preserve active packet approvals; execute only authorized packet IDs; serialize all worker cycles; expose start/pause/once/status/resume through authenticated local endpoints. Test authorization and hold behavior.
 - [x] Dashboard and configuration: show independent worker state, clear start/pause/run controls, exact packet approval and held reasons. Keep optional direct Notion credentials private; distinguish snapshot mode from authenticated sync.
 - [x] Integrate existing private search/history/PDF, expanded employer sources and verified answers. Start a real independent public discovery/preparation run. Preserve private evidence and report actual employer submissions separately.
-- [ ] Run rebuild/browser tests, root typecheck/tests, privacy check, dependency audit and staged diff review. Update setup/application docs and record decisions in Notion. Commit and push public-safe changes, verify remote commit.
+- [x] Run rebuild/browser tests, root typecheck/tests, privacy check, dependency audit and staged diff review. Update setup/application docs and record decisions in Notion. Commit and push public-safe changes, verify remote commit.
 
 ## Review focus
 
