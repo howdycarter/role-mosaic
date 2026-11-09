@@ -2,13 +2,14 @@
 
 A local-first job-search workspace. Bring your own résumé, career history, search rules, employer boards, and application records. Applicant data stays in your private local workspace and is not included in this repository.
 
-**Start with the independent rebuild in [`rebuild/`](rebuild/README.md).** It has a local dashboard, configurable public-board discovery, rule-based matching, history checks, and an optional Notion career-history snapshot. It needs Node.js 22+ and no API key or AI subscription. It can also fill, submit and verify supported one-page applications through the connected Codex Browser, after recipient-specific packet approval. CAPTCHA, accounts, unknown facts and uncertain outcomes are held. It is not an unattended scheduler. A tracking status is not a submission receipt. See [application setup](docs/APPLICATIONS.md).
+**Start with the independent rebuild in [`rebuild/`](rebuild/README.md).** Mosaic owns a local Playwright browser, job-search worker, dashboard and optional direct Notion connection. It can discover jobs, check your rules/history, prepare applications and independently submit specifically approved packets without an active Codex chat. CAPTCHA, accounts, unsupported forms and missing facts remain holds. A tracking status is not an employer receipt. Requires Node.js 22+ and no JEV/OpenRouter or AI subscription. All builds, tests and services run locally; no GitHub Actions or Vercel deployment. See [standalone setup](docs/STANDALONE.md).
 
 ## Quick start for a new applicant
 
 ```bash
 git clone https://github.com/howdycarter/role-mosaic.git
 cd role-mosaic/rebuild
+npm ci
 npm start -- init --resume /absolute/path/to/your-resume.pdf --search examples/search.json --boards examples/boards.json
 ```
 
@@ -31,13 +32,13 @@ npm run app
 
 Open http://127.0.0.1:4317. The core supports Greenhouse, Lever, and Ashby boards. Location screening currently supports US remote work and configured local cities; other markets need additional implementation. Salary extraction and imported history are conservative heuristics, not a professional-fit assessment or live applicant-tracking integration. Inspect the employer posting before acting.
 
-To connect your own Notion page, export or retrieve its Markdown and run `connect-notion --file /path/to/career.md --url https://www.notion.so/your-page` from the rebuild directory. This is an explicit snapshot import, not automatic synchronization. See the [setup guide](rebuild/README.md) for profile import, multiple workspaces, commands, and limitations.
+To connect Notion independently, open **Career history → Connect Notion directly to Mosaic** and provide your page ID and a read-access integration token. The token stays in your private local workspace; source updates never approve résumé changes or application answers. Export/snapshot import remains available without a token. See the [setup guide](rebuild/README.md).
 
 ## Public code, private applicant data
 
 - Each applicant initializes their own workspace; no real applicant profile, résumé, Notion document, search history, or credential is shipped.
 - Private runtime files, generated documents, application records, and environment files are git-ignored. An ignore rule cannot remove data that was already committed.
-- Run `npm run check:privacy` from the repository root and review `git diff --cached` before publishing. CI checks the committed tree for forbidden applicant paths and credential patterns.
+- Run `npm run verify:local` from the repository root and review `git diff --cached` before publishing. All checks run on your computer; no cloud build workflow is installed.
 - Discovery and career import do not upload applicant documents. The optional, authorized Browser application workflow transmits the approved fields and PDF to the selected employer; it does not use JEV or OpenRouter.
 - Résumé approval, application verification, CAPTCHA completion, and actual submission receipts are distinct steps. Supported Browser submissions use the guarded packet workflow. Unattended scheduling and universal ATS support are not implemented.
 

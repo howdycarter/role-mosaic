@@ -1,8 +1,8 @@
 # Browser-driven applications
 
-Mosaic can prepare, fill, submit and verify **supported one-page applications through a connected Codex Browser session**. It is a serial, guarded workflow, not an unattended scheduler or a universal ATS adapter. Greenhouse, Ashby and Lever hosted posting URLs are eligible for inspection; each actual form must expose supported controls. The live integration has been exercised on a Greenhouse application. Custom sites, Workday, sign-in, account creation, CAPTCHA, unsupported widgets and unknown required answers are held for review.
+Mosaic can prepare, fill, submit and verify **supported one-page applications using its own local Playwright worker**. Codex Browser remains an optional adapter; the standalone worker does not require it. This is a serial, guarded workflow, not a universal ATS adapter. Greenhouse, Ashby and Lever hosted posting URLs are eligible for inspection; each actual form must expose supported controls. Custom sites, Workday, sign-in, account creation, CAPTCHA, unsupported widgets and unknown required answers are held for review. See [standalone setup](STANDALONE.md) for dashboard controls, scheduling and direct Notion sync.
 
-Discovery/import still work without API keys or dependencies. The Browser driver requires Codex with its Browser connection. It makes no JEV/OpenRouter calls and estimates $0 provider cost. Other adapters must declare a cost estimate; the engine reserves that estimate against the configured daily budget. It cannot account for unrelated tools or account spending outside Mosaic.
+Discovery/import work without API keys. The standalone worker uses the rebuild's Playwright dependency and installed Chrome or Chromium. Both browser adapters make no JEV/OpenRouter calls and estimate $0 provider cost. Other adapters must declare a cost estimate; the engine reserves that estimate against the configured daily budget. It cannot account for unrelated tools or account spending outside Mosaic.
 
 ## Configure your own applicant
 
@@ -22,11 +22,11 @@ Discovery/import still work without API keys or dependencies. The Browser driver
 
    Existing application configuration is preserved rather than silently overwritten. The limit may be reduced to 1–15 daily attempts. Choose your own IANA timezone and budget. Initializing a workspace does not enable applications.
 
-5. Have Codex retrieve your chosen Notion career page, review it against the approved PDF, and keep the snapshot in private storage. Refresh it before a run. The core does not contain a Notion credential, authenticate to Notion, synchronize automatically, or promote all master-document claims into application answers. A changed PDF, verified profile or search configuration invalidates prepared packets.
+5. Import your career snapshot or connect Notion directly through the dashboard with your own read-access integration credential. Refresh the source before a run. Notion text remains evidence; it does not approve new facts or a different PDF. A changed PDF, verified profile or search configuration invalidates prepared packets.
 
 ## Prepare, authorize, run
 
-Ask Codex to prepare applications using your workspace and the connected Browser. The exported engine API is:
+Use **Search and prepare now**, review each recipient/data packet, then **Approve this application** and **Submit approved applications** in the local dashboard. **Start scheduled worker** repeats discovery and runs approved packets without an active Codex chat. It never auto-approves a new recipient. Alternatively, the optional Codex Browser engine API remains:
 
 ```js
 // In the trusted Codex Node REPL with an already selected Browser handle.
@@ -63,4 +63,4 @@ Every submission-capable click is preceded by a durable `submission_unknown` rec
 
 `npm start -- applications` shows counts; the dashboard shows attempt status and holds. `application-ledger.json`, `application-plan.json`, `application-approvals.json`, `application-profile.json`, `application-policy.json` and `receipts/` live under the private workspace and must never be committed. Attempt reservations include held/unknown operations and imported same-day confirmed applications; a confirmed receipt represented in both ledger and history is counted once.
 
-Only one run/import should modify a workspace at a time. The application runner holds a cross-process exclusive lock; unrelated tools that directly edit its JSON are not coordinated writers. Keep separate workspaces for different people. No daily scheduler is installed by this setup.
+Only one run/import should modify a workspace at a time. The worker and application runner use cross-process exclusive locks; unrelated tools that directly edit JSON are not coordinated writers. Keep separate workspaces for different people. The local timer runs while the server is up; an optional macOS login service is described in the standalone guide. Builds and tests run locally, without GitHub Actions or Vercel.

@@ -12,7 +12,7 @@ updates:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
     open-pull-requests-limit: 5
-  - package-ecosystem: github-actions
-    directory: /
+  - package-ecosystem: npm
+    directory: /rebuild
     schedule:
       interval: weekly

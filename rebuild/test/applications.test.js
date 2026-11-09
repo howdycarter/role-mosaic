@@ -28,6 +28,12 @@ test('regional pay chooses Texas/all-other-states, rejects ambiguous currency an
  assert.equal(dayAt(new Date('2026-11-10T01:00:00Z'),'America/Chicago'),'2026-11-09');
  assert.equal(postingKey('https://boards.greenhouse.io/example/jobs/123?gh_jid=123'),postingKey('https://job-boards.greenhouse.io/example/jobs/123'));
 });
+test('explicit US full-time base salary is recognized without requiring the word annual',()=>{
+ const pay=salaryForLocation('The US base salary range for this full-time position is $240,000-$310,000 USD.','TX');
+ assert.equal(pay?.min,240000);assert.equal(pay?.max,310000);
+ assert.equal(salaryForLocation('The US total compensation range for this full-time position is $240,000-$310,000 USD.','TX'),null);
+ assert.equal(salaryForLocation('The base salary range for this full-time position is $240,000-$310,000 CAD.','TX'),null);
+});
 test('plan is read-only; only explicit packet authorization enables fill and submit, with durable receipt state',async()=>{
  const f=await fixture();try{
   const plan=await f.prepare();assert.equal(plan.packets.length,1);assert.deepEqual(f.events,[]);
@@ -47,6 +53,9 @@ test('CAPTCHA and failed readback hold without clicking Submit',async()=>{
  const f=await fixture();try{await f.authorize();f.adapter.verify=async()=>({ok:false,captcha:true,reason:'Human verification required'});
  assert.equal((await f.run())[0].status,'held');assert.deepEqual(f.events,['fill']);assert.equal((await f.run())[0].status,'duplicate_held');
  }finally{await f.close();}
+});
+test('a worker pause after fill preserves a held draft without a final submission click',async()=>{
+ const f=await fixture();try{await f.authorize();const result=await runApplications({home:f.root,adapter:f.adapter,now,shouldContinue:()=>false});assert.equal(result[0].status,'held');assert.equal(result[0].reason,'Worker paused before submission');assert.deepEqual(f.events,['fill']);assert.deepEqual(await f.store.read('history.json'),[]);}finally{await f.close();}
 });
 test('daily limits include imported confirmed date-only receipts in the applicant timezone',async()=>{
  const f=await fixture();try{await f.authorize();const policy=await f.store.read('application-policy.json');policy.maxPerDay=1;await f.store.write('application-policy.json',policy);

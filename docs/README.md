@@ -2,6 +2,7 @@
 
 | File | One-liner |
 |---|---|
+| `STANDALONE.md` | Native Playwright worker, local scheduling, Notion integration, approvals, holds and local verification without Codex |
 | `ARCHITECTURE.md` | The pipeline end to end: where the code is, the apply loop, forms with several pages, verification, what the tool learns, cost, file formats |
 | `JEV.md` | Everything learned about JEV: the API, the three question types, confidence, pricing, patterns, and every question this tool asks with the reasoning |
 | `USAGE.md` | Day to day: how `/apply` works step by step, what the tool handles and leaves to you, your records, how well it works, how it learns, where your information goes, what is planned |

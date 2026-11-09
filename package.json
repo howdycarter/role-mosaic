@@ -27,7 +27,8 @@
     "audit": "npm audit --omit=dev",
     "setup-applicant": "node scripts/setup-applicant.mjs",
     "check:privacy": "node scripts/check-public-data.mjs",
-    "test:rebuild": "node --test rebuild/test/*.test.js"
+    "test:rebuild": "node --test rebuild/test/*.test.js",
+    "verify:local": "node scripts/verify-local.mjs"
   },
   "dependencies": {
     "commander": "^15.0.0",

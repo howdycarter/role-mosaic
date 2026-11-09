@@ -1,8 +1,8 @@
 # RoleMosaic — start your own search
 
-A local job-search workspace with public employer-board discovery, configurable rule matching, application-history checks, and a browser dashboard. Requires **Node.js 22+**. The independent core has **no dependencies to install, API key, AI subscription, or account requirement**. Run the commands below from `rebuild/`.
+A local job-search workspace with public employer-board discovery, configurable rule matching, application-history checks, a dashboard and its own Playwright worker. Requires **Node.js 22+**. Discovery/import need no API key or AI subscription. Run commands below from `rebuild/`; install Playwright with `npm ci` for the standalone worker.
 
-It finds and organizes jobs. Optional [Browser-driven applications](../docs/APPLICATIONS.md) can fill, submit and verify supported one-page forms after specific packet authorization. Unattended scheduling, universal ATS support, authenticated Notion sync and semantic résumé matching are not implemented. Tracking a job as “applied” does not submit it.
+Mosaic can search on a timer and fill, submit and verify supported one-page forms after specific packet authorization, without Codex controlling its browser. Optional direct Notion sync uses your own integration credential. Universal ATS support and semantic résumé matching are not implemented. Tracking a job as “applied” does not submit it. See [standalone setup](../docs/STANDALONE.md).
 
 ## 1. Create your private workspace
 
@@ -11,6 +11,7 @@ Clone the project, then choose one setup path:
 ```bash
 git clone https://github.com/howdycarter/role-mosaic.git
 cd role-mosaic/rebuild
+npm ci
 ```
 
 **Already have a résumé?** Attach your own PDF (20 MiB maximum):
@@ -104,7 +105,7 @@ Location screening currently supports US remote work and configured local cities
 
 ## Optional guarded applications
 
-Follow [application setup](../docs/APPLICATIONS.md) after reviewing your external PDF and application facts. Use `approve-resume`, `configure-applications` and the connected Codex Browser to prepare, authorize, execute and reconcile specific applications. Preparation does not enter personal data. Limits are 1–15 attempts/day plus your budget in your chosen timezone. Unknown required answers, sign-in, CAPTCHA and uncertain submissions stop safely.
+Follow [application setup](../docs/APPLICATIONS.md) after reviewing your external PDF and application facts. Use `approve-resume`, `configure-applications`, then the dashboard's **Search and prepare now**, **Approve this application** and **Submit approved applications** controls. Mosaic uses its own Chrome profile. Preparation does not enter personal data. Limits are 1–15 attempts/day plus your budget in your chosen timezone. Unknown answers, sign-in, CAPTCHA and uncertain submissions stop safely. **Start scheduled worker** repeats discovery and executes approved packets while the server is running. Approval is still specific to each posting; scheduling never grants new application permission.
 
 ## 4. Discover and use the dashboard
 
@@ -134,7 +135,7 @@ Export your page to Markdown, or use an already connected Notion tool to retriev
 npm start -- connect-notion --file /path/to/career-history.md --url https://www.notion.so/your-page
 ```
 
-This saves a private unapproved snapshot and page link for the dashboard. It does not authenticate, establish source truth, synchronize, or approve the résumé. Repeat after source changes. Use `import-career` separately if you want that Markdown in the multi-source review collection. No Notion token belongs in this repository.
+This command saves a private unapproved snapshot; it does not authenticate or synchronize. For independent sync, use **Career history → Connect Notion directly to Mosaic** with your page ID and integration token. Share the page with that integration in Notion first. The local token file has mode 0600 on POSIX, and the workspace has mode 0700; it is not encrypted by Mosaic. Alternatively provide `NOTION_API_KEY` to the server process. Source synchronization never changes an approved PDF or verified application facts. No Notion token belongs in the public repository.
 
 ## Import an existing legacy workspace
 
@@ -149,6 +150,6 @@ npm run check:privacy
 npm run test:rebuild
 ```
 
-Inspect `git diff --cached`. The privacy guard checks tracked files for private paths, documents, credential patterns and selected local identity values. CI checks the committed tree. It cannot guarantee arbitrary text contains no personal information; ignore rules cannot remove earlier commits. Never attach private exports, screenshots, logs, `.env` or job records to public issues. Share redacted errors and command names instead.
+Inspect `git diff --cached`. The privacy guard checks tracked files for private paths, documents, credential patterns and selected local identity values. Use `npm run verify:local` from the root for all local checks, including real-browser synthetic tests. No GitHub Actions or Vercel build is configured. The scanner cannot guarantee arbitrary text contains no personal information; ignore rules cannot remove earlier commits. Never attach private exports, screenshots, logs, `.env` or job records to public issues.
 
 If initialization refuses, choose a new workspace instead of deleting applicant records. If no matches appear, check the salary floor, board slugs and explicit location evidence. No API purchase is needed for the independent core. Run `npm test` in this directory for its tests; root `npm test` covers the legacy CLI.

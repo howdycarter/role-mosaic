@@ -3,6 +3,17 @@ import path from 'node:path';
 import { digest, formDigest, postingKey } from './applications.js';
 import { optionForAnswer, sameAnswer } from './application-values.js';
 
+export function postingLocation(text){
+ const header=String(text).slice(0,1500);
+ if(/\bexcept\b|\bexcluding\b|only (?:candidates|residents)|not eligible|must (?:reside|live|relocate)/i.test(header))return 'Location restrictions require review';
+ if(/\bremote\s*[-,–]?\s*(?:us(?:a)?|united states)\b/i.test(header))return 'Remote, United States';
+ // Some postings explicitly allow US remote work after a hybrid office header.
+ // The exception must not contradict an actual minimum qualification.
+ const qualifications=String(text).split(/Minimum Qualifications:/i)[1]?.split(/Preferred Qualifications:/i)[0];
+ if(qualifications&&/Most US-based positions can also be performed remotely/i.test(header)&&!/on[- ]?site|in[- ]office|must (?:reside|live|relocate)|not (?:eligible for|available for) remote/i.test(qualifications))return 'Remote, United States';
+ return header;
+}
+
 /** A Codex Browser transport. All page reads are DOM-backed; writes use visible AX/locator/file-chooser actions. */
 export class CodexBrowserAdapter {
  constructor(browser,{home,existingTabs={},verifiedReadbacks={},uploadedResumes={}}={}){this.browser=browser;this.home=home;this.verifiedReadbacks=verifiedReadbacks;this.uploads=uploadedResumes;this.existingTabs=existingTabs;this.tabs=new Map();this.estimatedCostUsd=0;}
@@ -33,8 +44,7 @@ export class CodexBrowserAdapter {
   if(new URL(view.url).origin!==new URL(job.url).origin||postingKey(view.url)!==postingKey(job.url))throw Error('Browser tab is no longer on the intended posting');
   const norm=s=>s.toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
   const titleVerified=view.headings.some(h=>norm(h)===norm(job.title));
-  const visibleLocation=view.main.slice(0,1500);
-  const location=/\bremote\s*[-,–]?\s*(?:us|united states)\b/i.test(visibleLocation)?'Remote, United States':visibleLocation;
+  const location=postingLocation(view.main);
   const files=view.fields.filter(f=>f.type==='file');
   const uploaded=this.uploads[job.id];
   const resume=files.find(f=>/resume|cv/i.test(f.label+' '+f.id))||(uploaded?.sha256&&view.text.includes(uploaded.filename)?{id:'resume',label:uploaded.label,attached:true,filename:uploaded.filename}:null);

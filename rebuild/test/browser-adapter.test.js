@@ -1,5 +1,19 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
-import {axIndex} from '../src/browser-adapter.js';
+import {axIndex,postingLocation} from '../src/browser-adapter.js';
+import {optionForAnswer,sameAnswer} from '../src/application-values.js';
+test('negative prior-employment answer matches an explicit never-worked option, not a positive employment history',()=>{
+ const field={label:'Are you now, or have you ever been employed by Example? *'};
+ const options=['Yes, I have worked at Example in the past','Yes, I am currently employed by Example','No, I have never worked at Example'];
+ assert.equal(optionForAnswer(field,'No',options),options[2]);assert.equal(sameAnswer(field,options[2],'No'),true);assert.equal(sameAnswer(field,options[0],'No'),false);
+ assert.equal(optionForAnswer({label:'Do you need sponsorship?'},'No',options),undefined);
+});
+test('explicit US remote policy is separated from hybrid office branding and respects qualification exceptions',()=>{
+ const policy='Santa Monica, CA/Remote\nWe offer a hybrid work environment. Most US-based positions can also be performed remotely (any exceptions will be noted in the Minimum Qualifications below.)\n';
+ assert.equal(postingLocation(policy+'Minimum Qualifications:\n10+ years designing products.\nPreferred Qualifications:\nAI tooling.'),'Remote, United States');
+ assert.notEqual(postingLocation(policy+'Minimum Qualifications:\nThis role must reside in California and work on-site.\nPreferred Qualifications:'),'Remote, United States');
+ assert.equal(postingLocation('VP Product\nRemote - USA'),'Remote, United States');
+ assert.equal(postingLocation('VP Product\nRemote - US, excluding Texas'),'Location restrictions require review');
+});
 test('AX controls use exact observed ids and label fallback when the browser omits an id',()=>{
  const ax='102 text field (settable) Description: First Name, Value: Example, ID: first_name\n105 text field (settable) Description: Last Name, ID: last_name\n108 text field (settable) Email\n114 combo box (collapsed, settable) Country, ID: country, Secondary Actions: Expand\n126 button Attach, ID: resume';
  assert.equal(axIndex(ax,{id:'email',label:'Email*'}),108);

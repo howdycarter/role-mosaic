@@ -20,10 +20,10 @@ export function supportedPosting(url) {
 export function samePosting(a,b){try{return new URL(a).origin===new URL(b).origin&&postingKey(a)===postingKey(b);}catch{return false;}}
 export function salaryForLocation(text,state) {
  const clean=String(text).replace(/\s+/g,' '),ranges=[];
- const pattern=/((?:USA\s+)?(?:annual\s+)?base\s+(?:salary|pay|compensation)(?:\s+range)?[^$]{0,180})\$([\d,]+)\s*(?:-|–|—|to)\s*\$([\d,]+)(?=(.{0,55}))/gi;
+ const pattern=/((?:(?:USA|US|United States)\s+)?(?:annual\s+)?base\s+(?:salary|pay|compensation)(?:\s+range)?[^$]{0,180})\$([\d,]+)\s*(?:-|–|—|to)\s*\$([\d,]+)(?=(.{0,55}))/gi;
  for(const m of clean.matchAll(pattern)){
-  const context=m[1]+' '+m[4];if(!/annual|per year|annually|yearly/i.test(context)||/CAD|AUD|hourly|monthly|per hour/i.test(context))continue;
-  if(!/USA|U\.S\.|USD|United States/i.test(context))continue;
+  const context=m[1]+' '+m[4];if(!/annual|per year|annually|yearly|full[- ]time position/i.test(context)||/CAD|AUD|hourly|monthly|per hour/i.test(context))continue;
+  if(!/\bUS\b|USA|U\.S\.|USD|United States/i.test(context))continue;
   const region=m[1].match(/\(([^)]+)\)/)?.[1]||'';
   const min=Number(m[2].replaceAll(',','')),max=Number(m[3].replaceAll(',',''));
   if(min>max||min<1000)continue;
@@ -112,17 +112,18 @@ export function authorizationMatches(approval,packet,now) {
  return approval?.approved===true&&approval.packetDigest===packet.digest&&approval.resumeSha256===packet.resumeSha256&&approval.profileSha256===packet.profileSha256&&approval.searchSha256===packet.searchSha256&&Date.parse(approval.expiresAt)>now.getTime();
 }
 /** Inspect only: no contact fields, uploads or final buttons are touched. */
-export async function prepareApplications({home,adapter,limit=15,now=()=>new Date()}) {
+export async function prepareApplications({home,adapter,limit=15,jobIds,now=()=>new Date()}) {
  const store=new ApplicationStore(home),ctx=await prerequisites(store,now()),jobs=await store.read('jobs.json',[]),attempts=await store.read('application-ledger.json',[]);
  const packets=[],held=[];
  for(const job of jobs){
+  if(jobIds&&!jobIds.includes(job.id))continue;
   if(packets.length>=Math.min(limit,ctx.policy.maxPerDay))break;
   if(!supportedPosting(job.url)||duplicate(job,ctx.history,attempts)||['applied','dismissed','rejected'].includes(job.status))continue;
   const preliminary=evaluate({...job,compensation:job.compensation||{min:ctx.search.minAnnualBaseUsd,currency:'USD',interval:'year'}},ctx.search);
-  if(preliminary.reasons.some(r=>r!=='Annual USD base compensation needs verification'))continue;
+  if(preliminary.reasons.some(r=>!['Annual USD base compensation needs verification','Location needs review'].includes(r)))continue;
   if(!/director|vice president|\bvp\b|head|chief/i.test(job.title)&&ctx.policy.requireICReview!==false){held.push({id:job.id,company:job.company,title:job.title,reason:'Individual-contributor specialization requires review'});continue;}
-  let inspection;try{inspection=await adapter.inspect(job);}catch{held.push({id:job.id,reason:'Posting or form could not be inspected'});continue;}
-  if(!inspection.titleVerified||inspection.closed||inspection.login){held.push({id:job.id,reason:'Closed, sign-in required, or title mismatch'});continue;}
+  let inspection;try{inspection=await adapter.inspect(job);}catch{held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Posting or form could not be inspected'});continue;}
+  if(!inspection.titleVerified||inspection.closed||inspection.login){held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Closed, sign-in required, or title mismatch'});continue;}
   const pay=salaryForLocation(inspection.description,ctx.profile.facts.stateCode);
   const fit=evaluate({...job,location:inspection.location,compensation:pay},ctx.search);
   if(fit.disposition!=='match'){held.push({id:job.id,company:job.company,title:job.title,reason:fit.reasons.join('; ')});continue;}
@@ -134,13 +135,13 @@ export async function prepareApplications({home,adapter,limit=15,now=()=>new Dat
  const result={createdAt:now().toISOString(),packets,held};await store.write('application-plan.json',result);return result;
 }
 /** Executes only immutable, explicitly authorized packets. Exceptions after a submit click remain unknown forever until reconciled. */
-export async function runApplications({home,adapter,now=()=>new Date(),limit=15,resumeAttemptId}) {
+export async function runApplications({home,adapter,now=()=>new Date(),limit=15,resumeAttemptId,packetIds,shouldContinue=()=>true}) {
  const store=new ApplicationStore(home);
  return store.lock(async()=>{
   const plan=await store.read('application-plan.json',null),approvals=await store.read('application-approvals.json',[]);
   if(!plan)throw Error('Prepare an application plan before running');
   const results=[];
-  for(const packet of plan.packets.slice(0,limit)){
+  for(const packet of plan.packets.filter(p=>!packetIds||packetIds.includes(p.id)).slice(0,limit)){
    const at=now(),ctx=await prerequisites(store,at),attempts=await store.read('application-ledger.json',[]),key=postingKey(packet.job.url);
    if(packet.digest!==digest(Object.fromEntries(Object.entries(packet).filter(([k])=>k!=='digest')))||packet.resumeSha256!==ctx.resumeSha256||packet.profileSha256!==ctx.profileSha256||packet.searchSha256!==ctx.searchSha256||Date.parse(packet.expiresAt)<=at.getTime())throw Error('Application packet changed or expired; prepare and authorize again');
    const resumed=resumeAttemptId?attempts.find(a=>a.id===resumeAttemptId&&a.status==='held'&&a.packetDigest===packet.digest):null;
@@ -161,6 +162,7 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
     attempt.browserEvidence=await adapter.fill(inspection,actions.actions,ctx.connections.resume);await save();
     const check=await adapter.verify(inspection,actions.actions,ctx.connections.resume);
     if(!check.ok||check.captcha||check.manual){attempt.status='held';attempt.reason=check.reason||'Readback, CAPTCHA or manual action required';await save();results.push({...attempt});continue;}
+    if(!await shouldContinue()){attempt.status='held';attempt.reason='Worker paused before submission';await save();results.push({...attempt});continue;}
     const current=await prerequisites(store,now());
     if(current.resumeSha256!==packet.resumeSha256||current.profileSha256!==packet.profileSha256||current.searchSha256!==packet.searchSha256||!(await store.read('application-approvals.json',[])).some(a=>authorizationMatches(a,packet,now()))||duplicate(packet.job,current.history,attempts.filter(a=>a.id!==attempt.id)))throw Error('Submission authorization or applicant state changed');
     attempt.status='submission_unknown';await save(); // Durable BEFORE the only final click.
