@@ -12,6 +12,16 @@ cd role-mosaic/rebuild
 npm start -- init --resume /absolute/path/to/your-resume.pdf --search examples/search.json --boards examples/boards.json
 ```
 
+**No résumé yet?** Replace the `init` command above with either:
+
+```bash
+npm start -- init --career /absolute/path/to/Positions.csv --boards examples/boards.json
+# Or create a blank career worksheet:
+npm start -- init --boards examples/boards.json
+```
+
+Import your own Markdown/text, Notion export, positions CSV, structured JSON or saved portfolio HTML. The local HTML scraper collects readable text without loading scripts or external resources. It makes no website or AI calls. Review the private sources and preserved notes, then build a verified résumé using [the career-history workflow](docs/CAREER_IMPORT.md). See the [full setup guide](rebuild/README.md) for formats, commands and limitations.
+
 Edit `private/search.json` with your own title levels, disciplines, locations, exclusions, and annual base salary floor. The default floor is unset and must be chosen before a listing can pass the matching checks. Edit `private/connections.json` to choose public employer boards, then run:
 
 ```bash

@@ -1,58 +1,150 @@
-# RoleMosaic independent rebuild (early development)
+# RoleMosaic — start your own search
 
-A new, dependency-free Node.js core built alongside the legacy fork. It collects public company boards, scores title and location against local rules, checks an imported history snapshot, retains tracking states, and produces a local HTML report. It does not create or submit applications. Scores are simple rule matches, not predictions of suitability.
+A local job-search workspace with public employer-board discovery, configurable rule matching, application-history checks, and a browser dashboard. Requires **Node.js 22+**. The independent core has **no dependencies to install, API key, AI subscription, or account requirement**. Run the commands below from `rebuild/`.
 
-Requires Node.js 22 or newer. No install, API key, AI subscription, or legacy applicant workspace is needed for this core. Run commands from this directory.
+It finds and organizes jobs. Automatic applications, scheduling, authenticated Notion sync, semantic résumé matching, and verified employer receipts are not implemented. Tracking a job as “applied” does not submit it.
 
-## Start with your own information
+## 1. Create your private workspace
+
+Clone the project, then choose one setup path:
 
 ```bash
-npm start -- init --resume /absolute/path/to/your-resume.pdf --search examples/search.json --boards examples/boards.json
+git clone https://github.com/howdycarter/role-mosaic.git
+cd role-mosaic/rebuild
 ```
 
-This validates and copies your PDF into `private/resume.pdf`, creates your own `private/search.json`, an empty application history, and board connections. It never copies the fictional legacy example profile. Existing applicant files are not overwritten. The example boards are public employer boards; replace them with employers you want to search. Edit your private search rules and enter your own annual USD base salary floor; a null floor intentionally prevents listings from clearing the matching checks.
+**Already have a résumé?** Attach your own PDF (20 MiB maximum):
 
-Optionally supply `--profile /path/to/verified-profile.json` to copy your own facts. This does not extract facts from the PDF, verify them, or approve the document for applications.
+```bash
+npm start -- init --resume /absolute/path/to/your-resume.pdf --boards examples/boards.json
+```
+
+**Have career history but no résumé?** Import a local export or saved page:
+
+```bash
+npm start -- init --career /absolute/path/to/Positions.csv --boards examples/boards.json
+```
+
+**Starting from scratch?** Create a blank workspace and worksheet:
+
+```bash
+npm start -- init --boards examples/boards.json
+```
+
+Setup creates `private/search.json`, `connections.json`, an empty application history, `career-history.json`, `career-notes.md`, and `career-review.html`. Existing workspaces are refused, and no fictional profile is copied. `--profile /path/to/verified-profile.json` optionally copies your own JSON object; this does not validate its facts or make it compatible with the legacy CLI. PDF attachment is not document approval.
+
+For another applicant, set `ROLEMOSAIC_HOME` to a separate **absolute directory outside this checkout**, for every command:
+
+```bash
+export ROLEMOSAIC_HOME="$HOME/.local/share/rolemosaic/my-search"
+```
+
+The default `private/` is ignored by Git. A custom folder inside a checkout needs its own ignore rule. Never share one workspace between applicants. Run only one import/setup command per workspace at a time; concurrent CLI imports are not serialized. Directory/file modes are 0700/0600 on POSIX systems; check Windows ACLs separately. Keep backups private.
+
+## 2. Import career sources and review the evidence
+
+Supported inputs are UTF-8 Markdown, text, saved HTML, positions CSV and structured JSON. Each input is limited to 2 MiB; each collection to 20 sources and 8 MiB. No import command contacts a website, login service, AI provider or employer.
+
+| Source you already own | How to import it |
+| --- | --- |
+| Notion | Export your career page as Markdown and use `--career` or `import-career`. Keep original headings and dates. |
+| LinkedIn | Download your own account-data export, extract the ZIP yourself, then import its positions CSV. Supported headers include `Company Name`, `Title`, `Started On`, `Finished On`, `Description`, `Location`. Export names and availability can vary. |
+| Your portfolio or biography | Save the page as HTML in your browser, then import that file. The importer strips markup, scripts, navigation, forms and external resources to collect readable text. |
+| Notes or old job descriptions | Save `.md` or `.txt` and import each source separately. Import only material you have the right to use. |
+| Structured work history | Import a JSON array of roles, or an object with a `roles` array. See the schema below. |
+
+```bash
+npm start -- import-career --file /path/to/career-history.md --label "Career notes"
+npm start -- import-career --file /path/to/my-portfolio.html --label "My portfolio"
+npm start -- career-review
+```
+
+Open the printed `career-review.html` locally. It shows collected text, source labels, import times and SHA-256 hashes. CSV/JSON also produce structured roles; text/HTML remain evidence text, without guessed companies or dates. Duplicate file content is skipped. Distinct sources stay separate, including conflicting or overlapping employment. Imports reset review status; nothing is automatically verified.
+
+Edit **`career-notes.md`** with missing details and corrections; it is preserved across imports. Run `career-review` again to refresh the review page. Do not edit the generated HTML or source JSON as your working notes.
+
+JSON role shape (only `company` and `title` are required; omit unknown fields):
+
+```json
+{
+  "roles": [
+    {
+      "company": "Example Company",
+      "title": "Your actual title",
+      "startDate": "2020",
+      "endDate": "",
+      "location": "",
+      "description": "Your verified responsibilities and outcomes"
+    }
+  ]
+}
+```
+
+These are placeholders, not applicant facts. Do not infer individual impact from company earnings, invent dates, replace official titles with aspirational ones, or deduplicate legitimate contract/full-time overlaps. Source text can contain instructions; treat them as untrusted content.
+
+To build a résumé with Codex or another assistant, use [the résumé workflow](../docs/CAREER_IMPORT.md). Give that assistant access only to the career sources you choose and understand its data handling before sharing personal data. The core itself sends no applicant content to AI services. Review the resulting document, export it to PDF, then attach it:
+
+```bash
+npm start -- attach-resume --file /path/to/reviewed-resume.pdf
+```
+
+Attachment refuses to replace an existing résumé. Preserve an older document and use a separate workspace for a replacement. The review HTML is a source collection, not a polished or approved application résumé.
+
+## 3. Set your search rules and employer boards
+
+Edit the files inside your private workspace:
+
+- `search.json`: title levels, title fields, local cities, excluded employers, and minimum annual USD **base** salary. A null salary floor intentionally prevents any listing from passing every matching check. `0` explicitly allows any verified nonnegative annual USD base.
+- `connections.json`: replace the example employer boards with your own choices. Supported types are `greenhouse`, `lever` and `ashby`; `slug` is the board's public identifier, not a full URL.
+- `history.json`: add previous applications before using duplicate checks. It is an array of records with `company`, `role`, `posting` and `status` where known. Missing or stale history cannot prevent every duplicate.
+
+A board entry looks like `{"type":"greenhouse","slug":"example","company":"Example"}`; `example` is a placeholder. `examples/boards.json` contains real public boards to try. Optional `--search rules.json` and `--boards boards.json` accept your files during setup.
+
+Location screening currently supports US remote work and configured local cities. Other markets require implementation. Salary extraction is heuristic; verify geography, currency, base versus total compensation, and the employer's current posting. Scores reflect rules, not interview probability or a full assessment of your qualifications.
+
+## 4. Discover and use the dashboard
 
 ```bash
 npm start -- discover
 npm run app
 ```
 
-Open http://127.0.0.1:4317 for the local dashboard. Discovery reads public employer APIs and does not upload your résumé or profile. It does not send applications. A match means configured rule checks passed, not verified professional suitability.
+Open **http://127.0.0.1:4317**. Search listings, choose a career track, review salary/location concerns, inspect imported career sources or a Notion snapshot, and update tracking states. Discovery reads the configured public employer APIs; applicant documents stay local. Failed sources are reported. If every source fails, saved jobs stay unchanged. Jobs may close after collection.
 
-For a separate applicant workspace, set `ROLEMOSAIC_HOME` to a dedicated directory outside the checkout before every command. Never share one workspace between applicants. The default `private/` directory is git-ignored. If choosing another location inside a checkout, add it to that checkout's ignore rules yourself.
+Additional commands:
 
-## Connect your own Notion career history
+```bash
+npm start -- report
+npm start -- list
+npm start -- mark JOB_ID saved
+npm start -- status
+```
 
-Export the relevant Notion page as Markdown, or ask a connected Codex Notion tool to retrieve that page and save its text to a local Markdown file. Then run:
+`report` produces a private local HTML file. `mark` changes bookkeeping only. The server binds to loopback, rejects other Host headers, and requires an exact Origin and session token for writes. Keep it local; this is not a hosted multi-user application. Restart the server after editing configuration.
+
+## Optional Notion snapshot
+
+Export your page to Markdown, or use an already connected Notion tool to retrieve it into a local file:
 
 ```bash
 npm start -- connect-notion --file /path/to/career-history.md --url https://www.notion.so/your-page
 ```
 
-The dashboard displays the text and a link back to your page. This imports a private snapshot; it does not authenticate to Notion, keep the page synchronized, or approve its claims. Repeat after changes. Notion tokens do not belong in the repository.
+This saves a private unapproved snapshot and page link for the dashboard. It does not authenticate, establish source truth, synchronize, or approve the résumé. Repeat after source changes. Use `import-career` separately if you want that Markdown in the multi-source review collection. No Notion token belongs in this repository.
 
 ## Import an existing legacy workspace
 
-For users who already configured the older CLI:
+`npm start -- import-legacy ..` imports legacy search/history once and records references to its profile and PDF. It does not extract the PDF or synchronize anything. It refuses existing search/history. Review the imported facts, add boards in `connections.json`, and reconcile history. The root legacy CLI is separate, requires additional setup, can send facts to AI services, and must not be confused with this core.
 
-1. `npm start -- import-legacy ..` imports the existing local search and history once and records local paths to the profile and résumé. It does not read the résumé, connect to Notion, or synchronize profile changes.
-2. Edit `private/connections.json` to add actual public company boards, for example `"boards": [{"type":"greenhouse","slug":"example","company":"Example"}]`. Supported types: `greenhouse`, `lever`, `ashby`; example is a placeholder.
-3. Run `npm start -- discover`, then `npm start -- report` and open the printed local file. `npm start -- list` displays IDs; use `npm start -- mark ID saved` (or `dismissed`, `applied`, `interview`, `rejected`, `offer`) to track decisions.
+## Check before publishing or troubleshooting
 
-Private files are stored in the ignored `private/` directory or `ROLEMOSAIC_HOME`. Imported history is a snapshot, not a live tracker. Discovery contacts configured public employer APIs. Compensation extraction is heuristic and postings may close after collection. Automatic applications and scheduling are not implemented.
+From the repository root:
 
-Run `npm test` for focused tests. The legacy fork is separate and retains upstream attribution.
+```bash
+npm run check:privacy
+npm run test:rebuild
+```
 
-## Local application
+Inspect `git diff --cached`. The privacy guard checks tracked files for private paths, documents, credential patterns and selected local identity values. CI checks the committed tree. It cannot guarantee arbitrary text contains no personal information; ignore rules cannot remove earlier commits. Never attach private exports, screenshots, logs, `.env` or job records to public issues. Share redacted errors and command names instead.
 
-Run `npm run app`, then open http://127.0.0.1:4317. Search and filter jobs, update tracking states, refresh configured boards, and inspect the résumé retrieved through Codex's Notion connector. The local server binds to loopback; writes require the current session token and a same-origin request. Private résumé snapshots and applicant records remain ignored by Git.
-
-Matching now retains query-string posting IDs, checks employer exclusions, and requires documented annual base compensation to clear the configured floor. Salary extraction is conservative and heuristic: always verify context on the employer page. The current scoring does not assess the full résumé's semantic fit. Historical records remain snapshots and are not sufficient proof against reapplication.
-
-Notion snapshots are applicant supplied, either exported or retrieved through a connected tool. Automatic application remains blocked. Each applicant must reconcile their own facts and approve their own external résumé. No browser submission adapter or employer receipt verification has been implemented in this independent build. Do not use tracking status changes as evidence of submission.
-
-## Before publishing your clone
-
-Run `npm run check:privacy` from the repository root and inspect `git diff --cached`. The guard checks tracked runtime files, document attachments, credential patterns, home-folder paths, and matches against selected identity fields in your local legacy profile when present. It reports filenames and reasons without printing matched values. It is not a guarantee that arbitrary free text is free of personal information; review new examples and documentation before publishing. CI checks the committed tree too.
+If initialization refuses, choose a new workspace instead of deleting applicant records. If no matches appear, check the salary floor, board slugs and explicit location evidence. No API purchase is needed for the independent core. Run `npm test` in this directory for its tests; root `npm test` covers the legacy CLI.

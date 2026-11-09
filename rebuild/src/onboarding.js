@@ -1,7 +1,8 @@
 import { readFile, mkdir, copyFile, readdir } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
-import { home, write } from './store.js';
+import { home, read, write, writeText } from './store.js';
+import { boundedFile, parseCareer, addSource, renderCareer, worksheet } from './career.js';
 
 export const starterSearch = {
   titleLevels: ['director', 'vp', 'head'],
@@ -34,29 +35,56 @@ export function validateBoards(boards) {
 }
 async function jsonFile(file) { return JSON.parse(await readFile(path.resolve(file), 'utf8')); }
 export async function initialize(opts) {
-  if (!opts.resume) throw Error('Usage: init --resume /path/to/resume.pdf [--search rules.json] [--boards boards.json] [--profile profile.json]');
+  if (opts.resume && opts.career) throw Error('Choose --resume PDF or --career FILE; additional sources can be imported after setup');
   try { if ((await readdir(home)).length) throw Error('Setup refused: applicant files already exist; use another ROLEMOSAIC_HOME to preserve them'); }
   catch (e) { if (e.code !== 'ENOENT') throw e; }
-  const source = path.resolve(opts.resume), pdf = await readFile(source);
-  if (path.extname(source).toLowerCase() !== '.pdf' || pdf.subarray(0,5).toString() !== '%PDF-') throw Error('Provide a PDF resume file');
+  const source = opts.resume ? path.resolve(opts.resume) : null;
+  if (source) await validatePdf(source);
+  const career = opts.career ? parseCareer(opts.career, await boundedFile(opts.career)) : null;
   const search = validateSearch(opts.search ? await jsonFile(opts.search) : structuredClone(starterSearch));
   const boards = validateBoards(opts.boards ? await jsonFile(opts.boards) : []);
   const profile = opts.profile ? await jsonFile(opts.profile) : null;
   if (profile !== null && (typeof profile !== 'object' || Array.isArray(profile))) throw Error('Profile must be a JSON object of your own verified facts');
   await mkdir(home,{recursive:true,mode:0o700});
-  const resume = path.join(home,'resume.pdf');
-  await copyFile(source,resume,constants.COPYFILE_EXCL);
-  const { chmod } = await import('node:fs/promises'); await chmod(resume,0o600);
+  const resume = source ? path.join(home,'resume.pdf') : null;
+  if (source) {
+    await copyFile(source,resume,constants.COPYFILE_EXCL);
+    const { chmod } = await import('node:fs/promises'); await chmod(resume,0o600);
+  }
   await write('search.json',search); await write('history.json',[]);
   if (profile) await write('profile.json',profile);
   await write('connections.json',{resume,profile:profile ? path.join(home,'profile.json') : null,boards});
+  await writeText('career-notes.md',worksheet);
+  const history = career ? addSource({version:1,sources:[]},career) : {version:1,reviewStatus:'needs-review',sources:[]};
+  await write('career-history.json',history); await renderCareer(history);
   return {home,boards:boards.length};
 }
 export async function connectNotion(opts) {
   if (!opts.file || !opts.url) throw Error('Usage: connect-notion --file career.md --url https://www.notion.so/your-page');
   const url = new URL(opts.url), hostname = url.hostname;
   if (url.protocol !== 'https:' || url.username || url.password || !['notion.so','notion.site','app.notion.com'].some(h => hostname === h || (h !== 'app.notion.com' && hostname.endsWith('.'+h)))) throw Error('Use the HTTPS URL of your Notion page');
-  const text = await readFile(path.resolve(opts.file),'utf8');
+  const text = (await boundedFile(opts.file)).toString('utf8');
   if (!text.trim() || Buffer.byteLength(text) > 2 * 1024 * 1024) throw Error('Notion snapshot must contain text and be at most 2 MiB');
   await write('notion-resume.json',{url:url.href,title:opts.title || 'Career history',text,syncedAt:new Date().toISOString(),approved:false});
+}
+
+async function validatePdf(file) {
+  const { open } = await import('node:fs/promises');
+  const handle = await open(file,'r');
+  try {
+    const stat = await handle.stat(), header = Buffer.alloc(5);
+    await handle.read(header,0,5,0);
+    if (!stat.isFile() || stat.size > 20*1024*1024 || path.extname(file).toLowerCase() !== '.pdf' || header.toString() !== '%PDF-') throw Error('Provide a PDF resume file of at most 20 MiB');
+  } finally { await handle.close(); }
+}
+export async function attachResume(opts) {
+  if (!opts.file) throw Error('Usage: attach-resume --file resume.pdf');
+  const connections = await read('connections.json',null);
+  if (!connections) throw Error('Initialize your applicant workspace first');
+  if (connections.resume) throw Error('A resume is already attached; preserve it and use a separate workspace for a replacement');
+  const source = path.resolve(opts.file); await validatePdf(source);
+  const resume = path.join(home,'resume.pdf');
+  await copyFile(source,resume,constants.COPYFILE_EXCL);
+  const { chmod } = await import('node:fs/promises'); await chmod(resume,0o600);
+  await write('connections.json',{...connections,resume});
 }

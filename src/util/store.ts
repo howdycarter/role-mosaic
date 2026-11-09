@@ -11,9 +11,9 @@ import { PATHS, STORE } from "../config.js";
 
 /** Writes a file so that a reader sees the old text or the new text, never half of one. */
 export function writeAtomic(file: string, text: string): void {
-  mkdirSync(path.dirname(file), { recursive: true });
+  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
-  const fd = openSync(tmp, "w");
+  const fd = openSync(tmp, "wx", 0o600);
   try {
     writeSync(fd, text);
     fsyncSync(fd);

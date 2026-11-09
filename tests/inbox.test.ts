@@ -90,18 +90,21 @@ describe("what an email says", () => {
 });
 
 describe("reading the mailbox", () => {
-  it("records what it is sure of, and only shows JEV a subject and a preview", async () => {
+  it("holds classified messages for explicit review, and only shows JEV a subject and a preview", async () => {
     const acme = job("Acme");
     const globex = job("Globex");
-    seed([acme, globex]);
+    const ids=seed([acme, globex]);
     const asked = jev("interview", 0.95);
     const placed = await readInbox(client([mail(), mail({ id: "m2", from: "talent@globex.com", fromName: "Globex Talent", subject: "Globex: next steps", snippet: "Could we find a time to talk this week about the role?" })]), asked, loadQueue(files.queue).entries, { file: files.inbox });
-    expect(placed.map((p) => [p.kind, p.entry?.job.company, p.sure])).toEqual([["confirmation", "Acme", true], ["interview", "Globex", true]]);
+    expect(placed.map((p) => [p.kind, p.entry?.job.company, p.sure])).toEqual([["confirmation", "Acme", false], ["interview", "Globex", false]]);
     // The rule settled the first email, so JEV saw only the second, and only these two short fields of it.
     expect(asked.shown).toEqual([{ subject: "Globex: next steps", preview: "Could we find a time to talk this week about the role?" }]);
     const s = recordReplies(placed, files);
-    expect(s).toMatchObject({ toConfirm: 0, ignored: 0 });
-    expect(formatInbox(s)).toMatch(/2 replies recorded[\s\S]*Globex \| Software Engineer Intern: asked for an interview/);
+    expect(s).toMatchObject({ toConfirm: 2, ignored: 0, recorded: [] });
+    expect(formatInbox(s)).toMatch(/2 for you to confirm/);
+    expect(loadQueue(files.queue).entries.every(e=>e.response===null)).toBe(true);
+    settleReview("m1", {jobId: ids[0]!,kind:"confirmation"},files);
+    settleReview("m2", {jobId: ids[1]!,kind:"interview"},files);
     const now = loadQueue(files.queue).entries;
     expect(now[0]?.response).toMatchObject({ kind: "confirmation", on: "2026-10-03" });
     expect(now[1]?.response?.kind).toBe("interview");
@@ -113,7 +116,12 @@ describe("reading the mailbox", () => {
   it("settles a submission that was never confirmed when the employer writes back", async () => {
     seed([job("Acme", "Software Engineer Intern", { status: "submission_unknown", statusReason: "Submit was clicked and no confirmation was seen", appliedAt: null })]);
     const s = recordReplies(await readInbox(client([mail()]), null, loadQueue(files.queue).entries, { file: files.inbox }), files);
-    expect(s.recorded[0]).toMatchObject({ kind: "confirmation", settled: true });
+    expect(s.recorded).toEqual([]);
+    expect(s.toConfirm).toBe(1);
+    const pending=loadQueue(files.queue).entries[0]!;
+    expect(pending.status).toBe("submission_unknown");
+    expect(pending.response).toBeNull();
+    settleReview("m1", {jobId:pending.job.id,kind:"confirmation"},files);
     expect(loadQueue(files.queue).entries[0]).toMatchObject({ status: "applied", statusReason: null });
   });
 
@@ -174,9 +182,11 @@ describe("reading the mailbox", () => {
     seed([job("Acme", "Backend Intern"), job("Acme", "Frontend Intern")]);
     const no = mail({ subject: "Acme: Frontend Intern", snippet: "Unfortunately we will not be moving forward with your application." });
     recordReplies(await readInbox(client([no]), null, loadQueue(files.queue).entries, { file: files.inbox }), files);
+    settleReview("m1", {jobId:loadQueue(files.queue).entries[1]!.job.id,kind:"rejection"},files);
     expect(loadQueue(files.queue).entries.map((e) => e.response?.kind ?? null)).toEqual([null, "rejection"]);
     const thanks = mail({ id: "m5", subject: "Acme: Frontend Intern", snippet: "Thank you for applying. We received your application." });
     recordReplies(await readInbox(client([thanks]), null, loadQueue(files.queue).entries, { file: files.inbox }), files);
+    settleReview("m5", {jobId:loadQueue(files.queue).entries[1]!.job.id,kind:"confirmation"},files);
     expect(loadQueue(files.queue).entries[1]?.response?.kind).toBe("rejection");
   });
 });
@@ -253,5 +263,16 @@ describe("the dashboard server's door", () => {
     expect(hasToken(req({ "x-jev-token": "abc123" }), "abc123")).toBe(true);
     expect(hasToken(req({ "x-jev-token": "abc124" }), "abc123")).toBe(false);
     expect(hasToken(req({}), "abc123")).toBe(false);
+  });
+});
+
+describe("unverified sender cannot manufacture a receipt", () => {
+  it("holds convincing confirmation from an unrelated sender and preserves unknown status", async () => {
+    seed([job("Acme", "Software Engineer Intern", {status:"submission_unknown",appliedAt:null})]);
+    const placed=await readInbox(client([mail({from:"attacker@unrelated.example",fromName:"Acme Careers"})]),null,loadQueue(files.queue).entries,{file:files.inbox});
+    expect(placed[0]?.sure).toBe(false);
+    recordReplies(placed,files);
+    expect(loadQueue(files.queue).entries[0]).toMatchObject({status:"submission_unknown",response:null});
+    expect(loadInbox(files.inbox).review).toHaveLength(1);
   });
 });

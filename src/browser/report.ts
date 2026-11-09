@@ -55,6 +55,8 @@ export type FillReport = {
   stuck?: string;
   /** True when moving to the next page sent the application: the button that looked like Next was the last one. */
   sent?: boolean;
+  /** A submission-capable navigation action has no verified outcome; never retry automatically. */
+  submissionUncertain?: boolean;
   seconds: number;
   jevCostUsd: number;
 };

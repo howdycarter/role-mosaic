@@ -4,9 +4,11 @@
  * the writer is escaped before it reaches the page.
  */
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
-import { BROWSER, childEnv, DOCUMENTS, PATHS } from "../config.js";
+import { tmpdir } from "node:os";
+import { Page, type Target } from "../browser/cdp.js";
+import { BROWSER, childEnv, DOCUMENTS } from "../config.js";
 import type { QueueEntry } from "../jobs/queue.js";
 import type { Profile } from "../profile/schema.js";
 import type { Tailored } from "./tailor.js";
@@ -90,44 +92,56 @@ export function coverHtml(profile: Profile, entry: QueueEntry, t: Tailored): str
 /** How many pages a PDF holds, from its page objects. Enough to tell one page from two. */
 export const pdfPages = (pdf: Buffer) => Math.max(1, (pdf.toString("latin1").match(/\/Type\s*\/Page(?![s\w])/g) ?? []).length);
 
-/**
- * Prints an HTML document to a PDF file and returns its page count. A headless Chrome of its own
- * does the printing: the runner's window cannot print, and nothing else needs installing. The
- * HTML is written next to the PDF while Chrome reads it, then removed.
- */
+/** Apply a policy before any template content, including imported active HTML. */
+export function privatePrintHtml(html: string): string {
+  return `<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; script-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">${html}`;
+}
+
+/** Prints in an isolated, sandboxed Chrome with scripts and network disabled before content loads. */
 export async function printPdf(html: string, outFile: string): Promise<number> {
-  const htmlFile = outFile.replace(/\.pdf$/, "") + ".html";
-  writeFileSync(htmlFile, html);
-  if (existsSync(outFile)) unlinkSync(outFile);
-  // Chrome writes the PDF and may then linger, so the file is watched and Chrome is stopped once it is whole.
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(BROWSER.chromePath, ["--headless=new", "--disable-gpu", "--no-sandbox", "--no-first-run", "--no-pdf-header-footer", `--print-to-pdf=${outFile}`, `--user-data-dir=${path.join(PATHS.runs, "print-profile")}`, `file://${htmlFile}`], { stdio: ["ignore", "ignore", "pipe"], env: childEnv() });
-    let err = "";
-    let done = false;
-    const finish = (fail?: Error) => {
-      if (done) return;
-      done = true;
-      clearInterval(poll);
-      clearTimeout(timer);
-      child.kill("SIGKILL");
-      if (fail) reject(fail);
-      else resolve();
-    };
-    let lastSize = -1;
-    const poll = setInterval(() => {
-      if (!existsSync(outFile)) return;
-      const size = statSync(outFile).size;
-      if (size > 0 && size === lastSize) finish();
-      lastSize = size;
-    }, 200);
-    const timer = setTimeout(() => finish(new Error("printing did not finish in time")), DOCUMENTS.printTimeoutMs);
-    child.stderr.on("data", (d: Buffer) => (err += d.toString()));
-    child.on("error", (e) => finish(new Error(`could not run Chrome to print: ${e.message}`)));
-    child.on("close", () => {
-      if (existsSync(outFile) && statSync(outFile).size > 0) finish();
-      else finish(new Error(`printing failed${err ? `: ${err.trim().split("\n").pop()?.slice(0, 160)}` : ""}`));
+  const profile = mkdtempSync(path.join(tmpdir(), "mosaic-print-"));
+  const child = spawn(BROWSER.chromePath, ["--headless=new", "--disable-gpu", "--no-first-run", "--disable-background-networking", "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank"], { stdio: ["ignore", "ignore", "pipe"], env: childEnv() });
+  let page: Page | null = null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("printing did not finish in time")), DOCUMENTS.printTimeoutMs); });
+  const work = async () => {
+    const port = await new Promise<string>((resolve, reject) => {
+      let message = "";
+      child.stderr.on("data", (b: Buffer) => {
+        message = (message + b.toString()).slice(-8192);
+        const match = /DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//.exec(message);
+        if (match) resolve(match[1] as string);
+      });
+      child.on("error", () => reject(new Error("Could not start Chrome for private PDF printing")));
+      child.on("close", () => reject(new Error("Chrome closed before printing was ready")));
     });
-  });
-  unlinkSync(htmlFile);
-  return pdfPages(readFileSync(outFile));
+    const response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(5000) });
+    const targets = await response.json() as Target[];
+    const target = targets.find(t => t.type === "page" && t.url === "about:blank");
+    if (!target) throw new Error("Private print page unavailable");
+    page = await Page.attach(target);
+    // Browser-level controls are installed BEFORE loading any applicant or template content.
+    await page.send("Emulation.setScriptExecutionDisabled", { value: true });
+    await page.send("Network.setBlockedURLs", { urls: ["*"] });
+    await page.send("Network.emulateNetworkConditions", { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 });
+    const frame = await page.mainFrame();
+    await page.send("Page.setDocumentContent", { frameId: frame.id, html: privatePrintHtml(html) });
+    const pdf = await page.send<{ data: string }>("Page.printToPDF", { printBackground: true, preferCSSPageSize: true });
+    const bytes = Buffer.from(pdf.data,"base64");
+    if (bytes.subarray(0,5).toString() !== "%PDF-") throw new Error("Chrome did not return a PDF");
+    // Atomic mode-safe replacement also repairs permissions on an older output file.
+    const temporary = `${outFile}.${process.pid}.pdf.tmp`;
+    writeFileSync(temporary,bytes,{mode:0o600,flag:"wx"});
+    const { renameSync } = await import("node:fs");
+    renameSync(temporary,outFile);
+    return pdfPages(bytes);
+  };
+  try { return await Promise.race([work(),deadline]); }
+  finally {
+    if (timer) clearTimeout(timer);
+    if (page) (page as Page).close();
+    child.kill("SIGKILL");
+    await new Promise<void>(resolve => { if (child.exitCode !== null || child.signalCode !== null) resolve(); else child.once("close",()=>resolve()); });
+    rmSync(profile,{recursive:true,force:true});
+  }
 }

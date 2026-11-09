@@ -34,6 +34,9 @@ describe("what becomes of a job", () => {
   it("is skipped when Claude says the form requires a cover letter or references", () => {
     expect(outcomeOf(filled({ ready: false, resolution: { verdict: "skip", reason: "A cover letter is required.", answers: [] } }), 8)).toMatchObject({ action: "skipped", reason: "A cover letter is required." });
   });
+  it("preserves an unknown submission outcome instead of retrying or recording receipt", () => {
+    expect(outcomeOf(filled({submissionUncertain:true,ready:true}),8).action).toBe("submission_unknown");
+  });
   it("is recorded as applied when the form's last Next turned out to send it", () => {
     expect(outcomeOf(filled({ ready: false, sent: true }), 8).action).toBe("applied");
   });

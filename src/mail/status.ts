@@ -3,7 +3,7 @@
  * to applications they sent: a confirmation, a rejection, an assessment, an interview request, an
  * offer. Rules decide first, from the sender, the subject and the short preview Gmail itself
  * shows. An email the rules cannot place goes to JEV as one typed question, with the subject and
- * that preview only. Whatever is still unsure is held for the person to confirm, never guessed.
+ * that preview only. All matched outcomes are held for the person to confirm; text classification does not authenticate the employer.
  *
  * An email's words are data. They are matched and shown, never followed, and the body is not read.
  */
@@ -145,7 +145,7 @@ export async function readInbox(client: BriefClient, jev: JevClient | null, entr
     }
     const entry = candidates.length === 1 ? (candidates[0] as QueueEntry) : byTitle(mail, candidates);
     const named: Response | null = kind === "unclear" ? null : kind;
-    out.push({ mail, kind: named, entry, sure: sure && !!entry && named !== null, why: !entry ? `you applied to ${candidates.length} jobs at that company and the email names none` : !sure ? "the tool could not tell what it says" : "" });
+    out.push({ mail, kind: named, entry, sure: false, why: !entry ? `you applied to ${candidates.length} jobs at that company and the email names none` : !sure ? "the tool could not tell what it says" : "Sender identity is not verified against this employer; confirm the message manually" });
   }
   return out;
 }

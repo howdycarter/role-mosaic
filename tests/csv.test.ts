@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { APPLIED_COLUMNS, COLUMNS, MANUAL_COLUMNS, SHEET_COLUMNS, appliedRecords, compactRows, emptyRow, localDate, manualRecords, parseCsv, saveRows, toCsv, upsertEntry } from "../src/log/csv.js";
+import { APPLIED_COLUMNS, COLUMNS, MANUAL_COLUMNS, SHEET_COLUMNS, appliedRecords, compactRows, emptyRow, localDate, manualRecords, loadRows, parseCsv, saveRows, toCsv, upsertEntry } from "../src/log/csv.js";
 import type { QueueEntry } from "../src/jobs/queue.js";
 
 const entry = (over: Partial<QueueEntry> = {}): QueueEntry => ({
@@ -87,3 +87,18 @@ describe("csv", () => {
   });
 });
 
+
+describe("spreadsheet export safety", () => {
+  it("neutralizes external formulas through whitespace and control prefixes, preserves internal cells across saves", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "mosaic-csv-safe-"));
+    for (const value of ["=1+1", "+SUM(1,2)", "-1+2", "@SUM(1,2)", " \t=1+1", "\r=1+1", "'=ordinary", "'ordinary"]) {
+      const rows = [{ ...emptyRow(), Company: value, "Job ID": "fixture", "App. Status": "Applied" }];
+      const file = path.join(dir,"all.csv"), applied = path.join(dir,"applied.csv");
+      saveRows(rows,file,applied);
+      expect(parseCsv(readFileSync(file,"utf8"))[1]?.[0]).toBe("'" + value);
+      expect(parseCsv(readFileSync(applied,"utf8"))[1]?.[1]).toBe("'" + value);
+      const loaded = loadRows(file); expect(loaded[0]?.Company).toBe(value);
+      saveRows(loaded,file,applied); expect(loadRows(file)[0]?.Company).toBe(value);
+    }
+  });
+});

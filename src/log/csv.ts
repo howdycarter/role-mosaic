@@ -69,9 +69,14 @@ export function parseCsv(text: string): string[][] {
   return rows.filter((r) => r.some((c) => c.trim() !== ""));
 }
 
+const formulaCell = (value: string) => /^[\s\x00-\x1f]*[=+@-]/u.test(value);
+/** Prefix formula-leading cells for spreadsheet import; quote-leading cells are escaped reversibly. */
+export const sheetCell = (value: string) => formulaCell(value) || value.startsWith("'") ? "'" + value : value;
+const originalCell = (value: string) => value.startsWith("''") || value.startsWith("'") && formulaCell(value.slice(1)) ? value.slice(1) : value;
+
 export function toCsv(rows: string[][]): string {
   const esc = (v: string) => (/[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
-  return rows.map((r) => r.map(esc).join(",")).join("\r\n") + "\r\n";
+  return rows.map((r) => r.map(sheetCell).map(esc).join(",")).join("\r\n") + "\r\n";
 }
 
 export function emptyRow(): Row {
@@ -85,7 +90,7 @@ export function loadRows(file = PATHS.applications): Row[] {
   return body.map((cells) => {
     const row = emptyRow();
     header.forEach((h, i) => {
-      if ((COLUMNS as readonly string[]).includes(h)) row[h as Column] = cells[i] ?? "";
+      if ((COLUMNS as readonly string[]).includes(h)) row[h as Column] = originalCell(cells[i] ?? "");
     });
     return row;
   });

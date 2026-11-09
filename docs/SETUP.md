@@ -1,3 +1,5 @@
+> For the independent core, use [the new setup guide](../rebuild/README.md). It supports applicants without a résumé through local career-history imports and needs no API key. This page covers the legacy CLI.
+
 # Setup (macOS)
 
 *About twenty minutes the first time. Last verified 2026-10-02.*

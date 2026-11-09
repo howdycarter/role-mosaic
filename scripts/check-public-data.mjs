@@ -12,7 +12,8 @@ export function inspectEntry(filename, content, applicantValues=[]) {
   if (f.startsWith('data/') && !publicData.has(f)) reasons.push('applicant data');
   if (f.startsWith('documents/') && f !== 'documents/README.md' || f.startsWith('applications/') && !['applications/README.md','applications/example.csv'].includes(f)) reasons.push('applicant document or record');
   if (/\.(pdf|docx?|rtf|pem|p12|pfx|key)$/i.test(f)) reasons.push('document or credential attachment');
-  if (/(?:sk-or-v1-[a-zA-Z0-9]{20,}|sk-proj-[a-zA-Z0-9_-]{30,}|gh[pousr]_[a-zA-Z0-9]{25,}|github_pat_[a-zA-Z0-9_]{30,}|AKIA[A-Z0-9]{16}|-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----)/.test(content)) reasons.push('credential pattern');
+  if (/(?:sk-or-v1-[a-zA-Z0-9]{20,}|sk-ant-[a-zA-Z0-9_-]{30,}|sk_(?:live|test)_[a-zA-Z0-9]{20,}|xox[baprs]-[a-zA-Z0-9-]{20,}|AIza[a-zA-Z0-9_-]{35}|sk-proj-[a-zA-Z0-9_-]{30,}|gh[pousr]_[a-zA-Z0-9]{25,}|github_pat_[a-zA-Z0-9_]{30,}|AKIA[A-Z0-9]{16}|-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----)/.test(content)) reasons.push('credential pattern');
+  if (/(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis):\/\/[^\s/:]+:[^\s/@]{8,}@/i.test(content)) reasons.push('connection credential pattern');
   if (/(?:\/Users\/|\/home\/)[a-zA-Z0-9_.-]+\//.test(content)) reasons.push('personal home-folder path');
   const lower=content.toLowerCase();
   if (applicantValues.some(v=>v.length>=8 && lower.includes(v.toLowerCase()))) reasons.push('matches local applicant identity');

@@ -3,7 +3,7 @@
  * a time: read every field, read each dropdown's options, one JEV call to map
  * them, write every value, read every value back. A form that runs over
  * several pages is walked with its own Next button once a page is clean.
- * Nothing here sends an application: that is submit.ts.
+ * Next/Continue may submit; authorization and durable journaling precede those clicks.
  */
 import path from "node:path";
 import { BROWSER, FORM, MEMORY, RUN } from "../config.js";
@@ -21,7 +21,7 @@ import { candidateOptions, closestOptions, readDropdownOptions } from "./dropdow
 import { applyFills, clearBox, TYPED_KINDS, uploadFile, type FillGuide } from "./fill.js";
 import { isProfileKey } from "../profile/fieldKeys.js";
 import { learn, notesFor, signatureOf, type Method } from "../knowledge/sites.js";
-import { blockedReport, comparePages, fieldsBlamed, notOnScreen, showsAnother, showsPlanned, emptyRequired, emptyRequiredFields, isClean, isReady, loadPlan, loadReport, pickNext, savePlan, saveReport, SIGN_IN_REASON, splitFailures, type Failure, type FieldReport, type Fill, type FillReport } from "./report.js";
+import { blockedReport, comparePages, notOnScreen, showsAnother, showsPlanned, emptyRequired, emptyRequiredFields, isClean, isReady, loadPlan, loadReport, pickNext, savePlan, saveReport, SIGN_IN_REASON, splitFailures, type Failure, type FieldReport, type Fill, type FillReport } from "./report.js";
 import { signInFor } from "../accounts/gate.js";
 import { controlStates, dump, goto, inFront, inTurn, install, loadSession, mutateSession, pageFor, settle, shownValues, trace, type Point } from "./session.js";
 
@@ -296,27 +296,28 @@ const pageSignature = (d: FieldsDump) => `${d.url.split("#")[0]}\n${d.fields.map
  * Next button is clicked, once. If the form does not move, what the page says is reported and the
  * form is held. If the click turns out to have sent the application, the report says so.
  *
- * In a rehearsal the button is clicked only when JEV agrees that the form goes on, so that a
- * rehearsal does not send a form whose last button happens to be called Continue.
+ * Button text and model judgments cannot prove that Continue is non-submitting.
+ * Dry/review-only runs and blocked leadership mode stop before browser attachment.
  */
-export async function nextPage(jev: JevClient, profile: Profile, job: Job, opts: { dry: boolean }): Promise<FillReport> {
+export async function nextPage(jev: JevClient, profile: Profile, job: Job, opts: { dry: boolean; submit?: boolean; onClick?: () => void }): Promise<FillReport> {
   const r = loadReport(job.id);
   const { dump: before, plan } = loadPlan(job.id);
   const next = pickNext(plan.submitSelectors);
   if (!next || !isClean(r)) return r;
   const started = Date.now();
   const hold = (reason: string): FillReport => saveReport({ ...r, ready: false, reason, stuck: reason, failed: [...r.failed, { selector: next.selector, label: next.text, why: reason }] });
+  if (opts.submit !== true || opts.dry || process.env.CODEX_LEADERSHIP === "1" || !opts.onClick) return hold("Next/Continue may submit the application. Automatic navigation requires explicit submission authorization and an enabled submission mode; review this page manually.");
+  const uncertain = (reason: string): FillReport => saveReport({...r,ready:false,hasNext:false,submissionUncertain:true,reason,stuck:reason});
   const page = await pageFor(job.id);
+  let clicked = false;
   try {
-    if (opts.dry) {
-      const state = await decidePageState(jev, await page.evaluate<string>("window.__awj.pageText()"), r.url, job.id);
-      if (state.hasMorePages < 0.5) return hold(`could not tell that "${next.text}" leads to another page and does not send the form, so the rehearsal stopped here`);
-    }
     await page.writesSettled(BROWSER.saveMs);
     const was = pageSignature(before);
     await inFront(page, async () => {
       const p = await page.awj<Point>("point", next.selector);
       if (!p.ok) throw new Error(`The "${next.text}" button is not on the page.`);
+      opts.onClick!();
+      clicked = true;
       await page.click(p.x, p.y);
     });
     // Wait for another page: other fields, or other buttons.
@@ -333,18 +334,7 @@ export async function nextPage(jev: JevClient, profile: Profile, job: Job, opts:
       }
       moved = pageSignature(d) !== was;
     }
-    if (!moved) {
-      const errors = await page.evaluate<string[]>("window.__awj.errors()");
-      const refusals = (r.refusals ?? 0) + 1;
-      if (refusals <= RUN.nextRetries) {
-        // The form says which boxes it objects to: those go back to the writer and the page is tried again. A form
-        // that says nothing was slow, or took the click as a first validation: its Next is pressed once more.
-        const blamed = fieldsBlamed(plan.fields, errors).filter((x) => !r.failed.some((y) => y.selector === x.selector));
-        trace(`${job.company}: "${next.text}" did not move the form (${refusals}), ${blamed.length ? `the page blames ${blamed.map((x) => x.label.slice(0, 30)).join(" | ")}` : errors.length ? "its errors name no box the tool knows" : "the page says nothing"}`);
-        if (blamed.length || !errors.length) return saveReport({ ...r, ready: false, refusals, failed: [...r.failed, ...blamed] });
-      }
-      return hold(`the form did not move on after "${next.text}"${errors.length ? `: ${errors.slice(0, 3).join("; ").slice(0, 200)}` : ""}`);
-    }
+    if (!moved) return uncertain(`No confirmed outcome after "${next.text}". Reconcile before retrying; this action may have submitted the application.`);
     await settle(page);
     await install(page);
     d = await dump(page);
@@ -356,22 +346,26 @@ export async function nextPage(jev: JevClient, profile: Profile, job: Job, opts:
     }
     const earlier = [...r.earlier, ...r.fields];
     const cost = r.jevCostUsd;
-    if (d.hasPassword) return saveReport({ ...blockedReport(job, SIGN_IN_REASON, d.url), earlier, page: r.page + 1 });
+    if (d.hasPassword) return uncertain("Sign-in appeared after a submission-capable action; reconcile the application before retrying");
     if (!d.fields.length && !d.submitSelectors.length) {
       // No form any more. Either the application went through, or the site showed something else.
       const state = await decidePageState(jev, await page.evaluate<string>("window.__awj.pageText()"), d.url, job.id);
       if (state.state === "submitted") return saveReport({ ...r, earlier, fields: [], page: r.page + 1, hasNext: false, ready: false, sent: true, reason: `"${next.text}" sent the application` });
-      return saveReport({ ...blockedReport(job, `after "${next.text}" the page was: ${state.state}`, d.url), earlier, page: r.page + 1 });
+      return uncertain(`Unconfirmed outcome after "${next.text}": ${state.state}; reconcile before retrying`);
     }
+    if (!isApplicationForm(d)) return uncertain("The next application page could not be verified; reconcile before retrying");
     trace(`${job.company}: page ${r.page + 1}, ${d.fields.length} fields`);
     return await fillPage(page, jev, profile, job, d, { page: r.page + 1, earlier, started, jevCostUsd: cost });
+  } catch (error) {
+    if (clicked) return uncertain(`Outcome unknown after a submission-capable action: ${error instanceof Error ? error.message : String(error)}. Reconcile before retrying.`);
+    throw error;
   } finally {
     page.close();
   }
 }
 
 /** True while a form should be taken to its next page: this page is clean, it has a Next, and the form has not run past the limit. */
-export const shouldAdvance = (r: FillReport) => r.state === "filled" && !r.stuck && r.hasNext && isClean(r) && (r.resolution?.verdict ?? "ready") === "ready" && !r.sent && r.page < RUN.maxPages;
+export const shouldAdvance = (r: FillReport) => r.state === "filled" && !r.submissionUncertain && !r.stuck && r.hasNext && isClean(r) && (r.resolution?.verdict ?? "ready") === "ready" && !r.sent && r.page < RUN.maxPages;
 
 /**
  * Two retries before anything is handed to Claude.

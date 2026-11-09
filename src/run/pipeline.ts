@@ -220,7 +220,7 @@ export async function waitedAtSignIn(e: QueueEntry, r: FillReport, o: { waitMs?:
 }
 
 /** A form whose values did not land on its first page is worth one more go: a page that loaded badly is often fine the second time. */
-const worthAnotherGo = (r: FillReport) => r.state === "filled" && r.page === 1 && !r.stuck && r.failed.length > 0;
+const worthAnotherGo = (r: FillReport) => r.state === "filled" && !r.submissionUncertain && r.page === 1 && !r.stuck && r.failed.length > 0;
 
 /** Settles what JEV left open on the page a job's tab shows: from the answer memory, or by Claude. A writer error leaves the form as it was. */
 export async function resolvePage(jev: JevClient, profile: Profile, entry: QueueEntry | null, r: FillReport, fresh: boolean): Promise<FillReport> {
@@ -505,7 +505,7 @@ async function walk(jev: JevClient, profile: Profile, e: QueueEntry, first: Fill
       r = await resolvePage(jev, profile, e, r, true);
     }
     if (!shouldAdvance(r)) return r;
-    r = await nextPage(jev, forJob(profile, e), asJob(e), { dry: o.dry });
+    r = await nextPage(jev, forJob(profile, e), asJob(e), { dry: o.dry, submit: o.submit, onClick: () => { record(e.job.id,"submission_unknown",UNKNOWN_REASON); keepTab(e.job.id,"submission_unknown"); } });
   }
 }
 
@@ -519,6 +519,7 @@ async function settle(jev: JevClient, r: FillReport, o: RunOptions): Promise<boo
     return false;
   }
   if (o.fillOnly) return false;
+  if (outcome.action === "submission_unknown") { record(r.jobId,"submission_unknown",outcome.reason); keepTab(r.jobId,"submission_unknown"); return false; }
   if (outcome.action === "send") return o.submit ? submitAndRecord(jev, r.jobId, false) : false;
   const rec = record(r.jobId, outcome.action, outcome.reason, {}, outcome.waitingFor ?? null);
   if (outcome.action === "awaiting_user_action" || outcome.action === "awaiting_email_verification") {

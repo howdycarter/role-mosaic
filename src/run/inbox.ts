@@ -8,7 +8,7 @@ import { loadRows, saveRows, upsertEntry } from "../log/csv.js";
 import { dayOfMail, mutateInbox, outcomeOf, type Placed } from "../mail/status.js";
 import { withStore } from "../util/store.js";
 
-type Reply = { id: string; kind: Response; receivedAt: number; subject: string };
+type Reply = { id: string; kind: Response; receivedAt: number; subject: string; confirmedByUser?: boolean };
 /** Where the records are. Only a test names other files. */
 export type RecordFiles = { queue?: string; rows?: string; inbox?: string };
 
@@ -24,8 +24,8 @@ export function recordReply(jobId: string, r: Reply, files: RecordFiles = {}): Q
       if (!was || (was.replies ?? []).some((x) => x.id === r.id)) return null;
       const replies = [...(was.replies ?? []), { id: r.id, kind: r.kind, at: r.receivedAt, subject: r.subject.slice(0, 200) }];
       const now = outcomeOf(replies);
-      // Any reply from the employer proves the application reached them.
-      const settles = was.status === "submission_unknown";
+      // Classification is not authenticated receipt evidence. Only explicit review can settle an unknown submission.
+      const settles = was.status === "submission_unknown" && r.confirmedByUser === true;
       return updateEntry(q, jobId, { replies, response: now ? { kind: now.kind, on: dayOfMail(now.at), subject: now.subject } : null, ...(settles ? { status: "applied" as const, statusReason: null, waitingFor: null, appliedAt: was.appliedAt ?? was.updatedAt } : {}) });
     }, files.queue);
     if (e) saveRows(upsertEntry(loadRows(files.rows), e), files.rows);
@@ -65,7 +65,7 @@ export function settleReview(messageId: string, answer: { jobId: string; kind: R
     return at < 0 ? null : (f.review.splice(at, 1)[0] ?? null);
   }, files.inbox);
   if (!item) return false;
-  if (answer) recordReply(answer.jobId, { id: item.id, kind: answer.kind, receivedAt: item.receivedAt, subject: item.subject }, files);
+  if (answer) recordReply(answer.jobId, { id: item.id, kind: answer.kind, receivedAt: item.receivedAt, subject: item.subject, confirmedByUser: true }, files);
   return true;
 }
 

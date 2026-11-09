@@ -31,6 +31,7 @@ export function notReady(r: FillReport): string {
 }
 
 export function outcomeOf(r: FillReport, maxPages: number): Outcome {
+  if (r.submissionUncertain) return {action:"submission_unknown",reason:r.reason || "Submission outcome unknown; reconcile before retrying",rememberSite:false};
   if (r.sent) return { action: "applied", reason: null, rememberSite: false };
   if (r.state === "blocked") {
     const reason = r.reason ?? "no form found";
