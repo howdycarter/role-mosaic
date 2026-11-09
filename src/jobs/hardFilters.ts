@@ -58,7 +58,7 @@ export function preFilter(
   if ((DISCOVER.unreadableAts as readonly string[]).includes(job.ats)) return `${job.ats} (its form cannot be read yet)`;
   const age = ageDays(job, now);
   if (age !== null && age > maxAgeDays) return `posted ${age} days ago`;
-  if (NON_SOFTWARE_TITLE.test(job.title) && !SOFTWARE_TITLE.test(job.title)) {
+  if (process.env.CODEX_LEADERSHIP !== "1" && NON_SOFTWARE_TITLE.test(job.title) && !SOFTWARE_TITLE.test(job.title)) {
     return "title is not a software role";
   }
   if (FRENCH_TITLE.test(job.title)) return "non-English posting";

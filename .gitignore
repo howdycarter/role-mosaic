@@ -35,3 +35,9 @@ npm-debug.log*
 
 # test output
 coverage/
+
+# Private applicant-specific search and imported records
+data/search.json
+data/history/
+data/profile.draft.json
+data/sources.local.json

@@ -100,7 +100,7 @@ export function valueFor(profile: Profile, key: ProfileKey): string | null {
   const edu = profile.education[0];
   if (!edu) throw new Error("profile.education must have at least one entry");
   const job = profile.experience[0];
-  const yes = (v: "yes" | "no" | "decline") => (v === "yes" ? "Yes" : v === "no" ? "No" : "I do not wish to answer");
+  const yes = (v: "yes" | "no" | "decline" | null) => (v === "yes" ? "Yes" : v === "no" ? "No" : v === "decline" ? "I do not wish to answer" : null);
   switch (key) {
     case "first_name": return profile.name.first;
     case "last_name": return profile.name.last;
@@ -126,12 +126,12 @@ export function valueFor(profile: Profile, key: ProfileKey): string | null {
     case "degree": return edu.degree;
     case "major": return edu.field;
     case "minor": return edu.minor ?? null;
-    case "education_start_date": return `${monthName(edu.startMonth)} ${edu.startYear}`;
-    case "education_start_month": return monthName(edu.startMonth);
-    case "education_start_year": return String(edu.startYear);
-    case "graduation_date": return `${monthName(edu.gradMonth)} ${edu.gradYear}`;
-    case "graduation_month": return monthName(edu.gradMonth);
-    case "graduation_year": return String(edu.gradYear);
+    case "education_start_date": return edu.startMonth && edu.startYear ? `${monthName(edu.startMonth)} ${edu.startYear}` : null;
+    case "education_start_month": return edu.startMonth ? monthName(edu.startMonth) : null;
+    case "education_start_year": return edu.startYear ? String(edu.startYear) : null;
+    case "graduation_date": return edu.gradMonth && edu.gradYear ? `${monthName(edu.gradMonth)} ${edu.gradYear}` : null;
+    case "graduation_month": return edu.gradMonth ? monthName(edu.gradMonth) : null;
+    case "graduation_year": return edu.gradYear ? String(edu.gradYear) : null;
     case "gpa": {
       const g = edu.gpa;
       if (!g || g.cumulative === undefined) return null;
@@ -169,7 +169,7 @@ export function valueFor(profile: Profile, key: ProfileKey): string | null {
     case "answer_no": return "No";
     case "consent_yes": return "Yes";
     case "notifications_opt_in": return null;
-    case "previously_applied": return "No";
+    case "previously_applied": return process.env.CODEX_LEADERSHIP === "1" ? null : "No";
     case "referral_name": return null;
     case "hackathons": return profile.facts.find((f) => /hackathon/i.test(f)) ?? null;
   }
@@ -177,12 +177,19 @@ export function valueFor(profile: Profile, key: ProfileKey): string | null {
 
 /** Whole years of experience across internships and founder roles, rounded down, minimum 0. */
 export function yearsOfExperience(profile: Profile): number {
-  let months = 0;
-  for (const e of profile.experience) {
+  const intervals = profile.experience.flatMap((e) => {
     const start = parseMonth(e.start);
     const end = e.current ? new Date() : parseMonth(e.end);
-    if (start && end) months += Math.max(0, (end.getFullYear() - start.getFullYear()) * 12 + end.getMonth() - start.getMonth());
+    if (!start || !end || end < start) return [];
+    return [[start.getFullYear() * 12 + start.getMonth(), end.getFullYear() * 12 + end.getMonth()] as [number, number]];
+  }).sort((a, b) => a[0] - b[0]);
+  let months = 0, lo = -1, hi = -1;
+  for (const [start, end] of intervals) {
+    if (lo < 0) { lo = start; hi = end; }
+    else if (start <= hi) hi = Math.max(hi, end);
+    else { months += hi - lo; lo = start; hi = end; }
   }
+  if (lo >= 0) months += hi - lo;
   return Math.floor(months / 12);
 }
 
@@ -200,6 +207,6 @@ export function profileFacts(profile: Profile): Record<string, string> {
   }
   out.citizenships = profile.workAuthorization.citizenships.join(", ");
   out.authorized_countries = profile.workAuthorization.authorizedCountries.join(", ");
-  out.requires_sponsorship_outside_authorized_countries = profile.workAuthorization.requiresSponsorshipElsewhere ? "Yes" : "No";
+  if (profile.workAuthorization.requiresSponsorshipElsewhere !== null) out.requires_sponsorship_outside_authorized_countries = profile.workAuthorization.requiresSponsorshipElsewhere ? "Yes" : "No";
   return out;
 }

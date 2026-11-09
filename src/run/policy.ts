@@ -7,6 +7,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { z } from "zod";
 import { DAILY, DISCOVER, PATHS } from "../config.js";
 import type { QueueEntry } from "../jobs/queue.js";
+import { leadershipTitle, leadershipLocation, compensationEvidence } from "../jobs/leadership.js";
+import { historyRefusal } from "../jobs/history.js";
 
 export const Policy = z.object({
   version: z.literal(1).default(1),
@@ -15,7 +17,7 @@ export const Policy = z.object({
   /** Where a job may be: vancouver, canada, remote, us, international, unclear. Empty means anywhere the search kept. */
   where: z.array(z.enum(["vancouver", "canada", "remote", "us", "international", "unclear"])).default([]),
   /** Which kinds of job: internship, new_grad. Empty means both. */
-  levels: z.array(z.enum(["internship", "new_grad"])).default([]),
+  levels: z.array(z.enum(["internship", "new_grad", "experienced"])).default([]),
   /** The lowest fit score a job may have. */
   minScore: z.number().min(0).max(1).default(DISCOVER.applyThreshold),
   /** Which job boards, by the name in the queue: greenhouse, lever, ashby, workday and so on. Empty means every board the tool fills. */
@@ -23,7 +25,7 @@ export const Policy = z.object({
   /** Employers never applied to by the daily run. A name here matches any company whose name contains it. */
   excludeEmployers: z.array(z.string()).default([]),
   /** A resume written for each job, and a cover letter where a form has a box for one. */
-  documents: z.object({ tailor: z.boolean().default(false), cover: z.boolean().default(false) }).default({}),
+  documents: z.object({ tailor: z.boolean().default(false), cover: z.boolean().default(false) }).default({ tailor: false, cover: false }),
   /** The most JEV may cost in one day. The run stops when it is reached. */
   jevBudgetUsd: z.number().min(0).default(DAILY.jevBudgetUsd),
 });
@@ -39,6 +41,13 @@ export function loadPolicy(file = PATHS.policy): Policy | null {
 
 /** Why the policy keeps a job out of the daily run, or null when it may go. */
 export function policyRefuses(e: QueueEntry, p: Policy): string | null {
+  if (process.env.CODEX_LEADERSHIP === "1") {
+    const historic = historyRefusal(e.job);
+    if (historic) return historic;
+    if (!leadershipTitle(e.job.title)) return "outside the leadership role criteria";
+    if (!leadershipLocation(e.job.locations)) return "location does not match your configured criteria";
+    if (!compensationEvidence(e.job.description ?? "")) return "compensation is not verified: review total compensation";
+  }
   const company = e.job.company.toLowerCase();
   const excluded = p.excludeEmployers.find((x) => x.trim() && company.includes(x.trim().toLowerCase()));
   if (excluded) return `you excluded ${excluded}`;

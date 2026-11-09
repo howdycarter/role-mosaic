@@ -33,6 +33,7 @@ export function fitQuestions(profile: Pick<Profile, "education">): Questions {
   const year = edu?.gradYear ?? new Date().getUTCFullYear() + 1;
   return {
     ...FIT_QUESTIONS,
+    ...(process.env.CODEX_LEADERSHIP === "1" ? { is_software_role: noul("Is this a leadership, staff or principal role in software engineering, product management, product design, UX, experience design, or research?", { true: "A senior engineering, product or design leadership role", false: "Another kind of role" }) } : {}),
     term: choice("Which term or start does this posting target?", termCriteria(month, year)),
     graduation_excluded: noul(`Does the posting require a graduation date or year of study that a candidate graduating in ${monthName(month)} ${year} does not meet?`, {
       true: `It names a graduation window, class year or "returning to school after" rule that excludes ${monthName(month)} ${year}`,
@@ -109,7 +110,7 @@ export function buildFitState(job: Job, profile: Profile, now = new Date()): Rec
       summary: profile.summary,
       skills: profile.skills,
       facts: profile.facts,
-      graduation: profile.education[0] ? `${monthName(profile.education[0].gradMonth)} ${profile.education[0].gradYear}` : "not given",
+      graduation: profile.education[0]?.gradYear ? `${profile.education[0].gradMonth ? monthName(profile.education[0].gradMonth) + " " : ""}${profile.education[0].gradYear}` : "not given",
       citizenship: profile.workAuthorization.citizenships,
       authorized_to_work_in: profile.workAuthorization.authorizedCountries,
       preferred_locations: profile.preferences.preferredLocations,
@@ -151,7 +152,8 @@ export function scoreFromAnswers(job: Job, answers: Record<string, Answer>, now 
 
   let skipReason: string | null = null;
   if (n("is_software_role") < 0.5) skipReason = "not a software role";
-  else if (c("level").choice === "experienced" && c("level").confidence >= 0.6) skipReason = "requires professional experience";
+  else if (process.env.CODEX_LEADERSHIP !== "1" && c("level").choice === "experienced" && c("level").confidence >= 0.6) skipReason = "requires professional experience";
+  else if (process.env.CODEX_LEADERSHIP === "1" && ["internship", "new_grad"].includes(c("level").choice)) skipReason = "entry-level role";
   else if (n("is_unpaid") > 0.7) skipReason = "unpaid";
   else if (n("needs_advanced_degree") > 0.7) skipReason = "advanced degree required";
   else if (c("work_auth").choice === "us_no_sponsorship" && c("work_auth").confidence >= 0.5 && !us.authorized) skipReason = "US role, no sponsorship";
@@ -159,8 +161,8 @@ export function scoreFromAnswers(job: Job, answers: Record<string, Answer>, now 
   else if (job.ats === "other" && n("needs_account") > 0.9) skipReason = "needs an account to apply";
   else if (n("requires_references") > 0.85) skipReason = "references required";
 
-  const levelFit = { internship: 1, new_grad: 1, experienced: 0.1, other: 0.3 }[c("level").choice] ?? 0.3;
-  const termFit = { summer: 1, new_grad: 1, winter: 0.8, earlier: 0.3, other: 0.5 }[c("term").choice] ?? 0.5;
+  const levelFit = process.env.CODEX_LEADERSHIP === "1" ? (c("level").choice === "experienced" ? 1 : 0.2) : ({ internship: 1, new_grad: 1, experienced: 0.1, other: 0.3 }[c("level").choice] ?? 0.3);
+  const termFit = process.env.CODEX_LEADERSHIP === "1" ? 1 : ({ summer: 1, new_grad: 1, winter: 0.8, earlier: 0.3, other: 0.5 }[c("term").choice] ?? 0.5);
   const components = {
     stackMatch: scoreToUnit(s("stack_match").score, LEVELS5.length),
     experienceMatch: scoreToUnit(s("experience_match").score, LEVELS5.length),
@@ -174,7 +176,7 @@ export function scoreFromAnswers(job: Job, answers: Record<string, Answer>, now 
   const age = ageDays(job, now);
   const recency = age === null ? 0.85 : 1 - (1 - RECENCY_FLOOR) * Math.min(1, age / DISCOVER.maxAgeDays);
   // The candidate may still apply, so a graduation window that excludes them lowers the rank instead of dropping the job.
-  const gradExcluded = n("graduation_excluded") > 0.7;
+  const gradExcluded = process.env.CODEX_LEADERSHIP !== "1" && n("graduation_excluded") > 0.7;
   const scoreValue = Math.round(base * LOCATION_MULTIPLIER[tier] * recency * (gradExcluded ? GRADUATION_MISMATCH_MULTIPLIER : 1) * 1000) / 1000;
 
   if (c("work_auth").choice === "us_sponsors" && !us.authorized) reasons.push("US role, sponsorship offered");

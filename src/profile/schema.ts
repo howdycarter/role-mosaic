@@ -51,10 +51,10 @@ export const ProfileSchema = z.object({
         /** Other names the same field goes by, tried in this order on a list that does not have `field` ("Computer Science" for "Computing Science"). A box that takes any text still gets `field`. */
         fieldAlso: z.array(z.string()).optional(),
         minor: z.string().optional(),
-        startMonth: z.number().int().min(1).max(12),
-        startYear: z.number().int(),
-        gradMonth: z.number().int().min(1).max(12),
-        gradYear: z.number().int(),
+        startMonth: z.number().int().min(1).max(12).optional(),
+        startYear: z.number().int().optional(),
+        gradMonth: z.number().int().min(1).max(12).optional(),
+        gradYear: z.number().int().optional(),
         status: z.enum(["in_progress", "completed", "transferred"]),
         gpa: z
           .object({
@@ -100,18 +100,18 @@ export const ProfileSchema = z.object({
     /** Countries where the candidate can work without sponsorship. */
     authorizedCountries: z.array(z.string()).min(1),
     /** Whether sponsorship would be needed in any country not listed above. */
-    requiresSponsorshipElsewhere: z.boolean(),
+    requiresSponsorshipElsewhere: z.boolean().nullable(),
     /** One sentence, used verbatim when a form asks to explain status. */
     statement: z.string(),
   }),
   demographics: z.object({
-    gender: z.string(),
-    ethnicity: z.string(),
-    hispanicOrLatino: YesNoDecline,
-    veteran: YesNoDecline,
-    disability: YesNoDecline,
-    sexualOrientation: z.string(),
-    transgender: YesNoDecline,
+    gender: z.string().nullable(),
+    ethnicity: z.string().nullable(),
+    hispanicOrLatino: YesNoDecline.nullable(),
+    veteran: YesNoDecline.nullable(),
+    disability: YesNoDecline.nullable(),
+    sexualOrientation: z.string().nullable(),
+    transgender: YesNoDecline.nullable(),
   }),
   preferences: z.object({
     earliestStart: z.string(),

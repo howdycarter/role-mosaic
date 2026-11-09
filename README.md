@@ -1,3 +1,25 @@
+# Jev Job Search — configurable edition
+
+A local-first job-search assistant adapted from [qbeka/jev-job-search](https://github.com/qbeka/jev-job-search) (MIT). Applicants bring their own résumé, profile, search criteria, and OpenRouter key. The original upstream documentation follows below; where it differs, this section describes this edition.
+
+**Status:** Experimental. Leadership-mode submission is intentionally blocked while duplicate prevention, compensation checks, and résumé selection are completed. Do not rely on it for unattended applications. This edition currently supports US-focused location screening; other markets need additional implementation. Codex can help edit and run the project, but the current answer writer still uses Claude Code or the Claude API.
+
+## Set up your own search
+
+1. Install Node.js 22+, Google Chrome, and Claude Code (or configure the Claude API as described below). Clone this repository and run `npm install`.
+2. Run `npm run setup-applicant -- /absolute/path/to/resume.pdf`. This copies your PDF into `documents/resume.pdf`, creates an incomplete `data/profile.draft.json` and a sample `data/search.json`, and does not contact job boards or submit anything. Existing résumé and configuration files are not overwritten.
+3. Edit `data/profile.draft.json` with true, verified information. Leave unknown facts unknown; do not replace them with example data. Confirm dates, authorization and preferences. A valid profile requires all required fields, and fields that remain unresolved may require manual handling. Move the completed draft to `data/profile.json` only after reviewing it.
+4. Edit `data/search.json`: choose your title levels, fields, cities, US-remote preference, and a conservative annual base salary floor. The example numbers are placeholders. Total-compensation cases below that base floor need manual review. This search mode does not yet support non-US remote rules.
+5. Copy `.env.example` to `.env`, set `OPENROUTER_API_KEY` locally, and set `CODEX_LEADERSHIP=1`. Never paste a key into an issue, commit or chat. Run `npm run doctor` to check setup; `npx jev doctor --online` makes small paid test calls.
+6. If importing application history, place a JSON file with an `applications` array at `data/history/applications.json`; entries may contain `company`, `role`, `posting`, and `status`. The checker treats exact matches conservatively. **An imported snapshot is not live**; refresh and reconcile it before any future submission.
+7. Use `npx jev discover --limit 10` for a small read-only search, then `npx jev report` for the local dashboard. Discovery sends profile facts and job text to OpenRouter. Form filling can send data to employers before submission. Do not run live fills unless you intend that disclosure.
+
+Your `.env`, résumé, profile, history, queue, and application records are git-ignored. Keep them private and check `git status` before publishing. The checked-in examples contain placeholders or fictional data; they are not usable applicant profiles.
+
+**Other applicants:** This repository does not currently offer a Notion integration, a self-service graphical onboarding flow, or a live shared tracker. Import your own facts and records locally. The original student-focused sources remain in the discovery pipeline, so assess results critically. Workday, other account-based sites, and automatic submission remain limited.
+
+---
+
 # jev-job-search
 
 *The job search that fills the forms for you.*

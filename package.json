@@ -2,7 +2,7 @@
   "name": "jev-job-search",
   "version": "1.6.0",
   "private": true,
-  "description": "Finds software internships and new-grad roles, rates them with JEV, fills and verifies each application in seconds, and submits it.",
+  "description": "A configurable, local-first job-search and application assistant.",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -23,16 +23,17 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "check-types": "tsc --noEmit",
-    "audit": "npm audit --omit=dev"
+    "audit": "npm audit --omit=dev",
+    "setup-applicant": "node scripts/setup-applicant.mjs"
   },
   "dependencies": {
     "commander": "^15.0.0",
-    "zod": "^3.24.2"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
-    "vitest": "^3.0.9"
+    "vitest": "5.1.0"
   }
 }

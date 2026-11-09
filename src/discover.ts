@@ -1,3 +1,4 @@
+import { leadershipTitle, leadershipLocation } from "./jobs/leadership.js";
 /**
  * The discover pipeline: sources → dedupe → pre-filter → describe → rate → queue.
  * No browser involved. Safe to run as often as you like; everything is cached
@@ -102,7 +103,7 @@ export async function collectJobs(opts: DiscoverOptions = {}): Promise<Job[]> {
     let fromBoards = 0;
     results.forEach((r) => {
       if (!r.ok) return;
-      const early = r.value.filter((j) => isEarlyCareerTitle(j.title, opts.gradYear));
+      const early = r.value.filter((j) => process.env.CODEX_LEADERSHIP === "1" ? leadershipTitle(j.title) && leadershipLocation(j.locations) : isEarlyCareerTitle(j.title, opts.gradYear));
       fromBoards += early.length;
       jobs.push(...early);
     });
@@ -186,7 +187,7 @@ export async function discover(profile: Profile, jev: JevClient, opts: DiscoverO
   // An account board counts when the person has an account there or allowed one, even if today's limit of new accounts is used up.
   const withAccount = (url: string) => (capabilityFor(url)?.verdict ?? "no") !== "no";
   for (const job of all) {
-    const reason = preFilter(job, now, (url) => isWalled(url, learned), us, opts.maxAgeDays, withAccount);
+    const reason = process.env.CODEX_LEADERSHIP === "1" && (!leadershipTitle(job.title) || !leadershipLocation(job.locations)) ? "outside leadership title or location criteria" : preFilter(job, now, (url) => isWalled(url, learned), us, opts.maxAgeDays, withAccount);
     if (reason) decided.push({ job, fit: null, reason });
     else kept.push(job);
   }

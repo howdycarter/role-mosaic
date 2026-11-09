@@ -53,6 +53,7 @@ export async function verifyIntended(page: Page, plan: FillPlan, answers: { sele
  * before the click: from that moment the application may be with the employer, whatever happens next.
  */
 export async function submitJob(jev: JevClient, jobId: string, opts: { force?: boolean; onClick?: () => void } = {}): Promise<SubmitResult> {
+  if (process.env.CODEX_LEADERSHIP === "1") throw new Error("Leadership submission is disabled until compensation, current application history and profile safeguards are implemented and verified.");
   const force = !!opts.force;
   const r = loadReport(jobId);
   if (!r.ready && !force) throw new Error(`not ready to submit: ${r.resolution?.reason || [...r.missingRequired.map((l) => `empty: ${l.slice(0, 50)}`), ...r.failed.map((f) => `failed: ${f.label.slice(0, 50)}`), ...r.reviews.map((x) => `review: ${x.label.slice(0, 50)}`), ...r.drafts.map((x) => `draft: ${x.label.slice(0, 50)}`)].join("; ") || r.reason}`);

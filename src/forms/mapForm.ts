@@ -42,8 +42,8 @@ export function buildFormState(profile: Profile, job: Job, dump: FieldsDump, fie
       },
       education: {
         ...profile.education[0],
-        degree_start: `${monthName(profile.education[0]?.startMonth ?? 1)} ${profile.education[0]?.startYear} (month ${profile.education[0]?.startMonth})`,
-        degree_end_or_graduation: `${monthName(profile.education[0]?.gradMonth ?? 1)} ${profile.education[0]?.gradYear} (month ${profile.education[0]?.gradMonth})`,
+        degree_start: profile.education[0]?.startMonth && profile.education[0]?.startYear ? `${monthName(profile.education[0].startMonth)} ${profile.education[0].startYear}` : "unknown",
+        degree_end_or_graduation: profile.education[0]?.gradMonth && profile.education[0]?.gradYear ? `${monthName(profile.education[0].gradMonth)} ${profile.education[0].gradYear}` : "unknown",
       },
       /** What the candidate has done, so a count or a yes/no about it is answered from the record and not guessed. */
       background: {
@@ -247,12 +247,12 @@ export function educationDatePlan(f: DumpedField, previous: DumpedField[], profi
   const looksLikeMonths = labels.some((l) => /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i.test(l)) || labels.filter((l) => /^(0?[1-9]|1[0-2])$/.test(l)).length >= 12;
   let opt: { value: string; label: string } | undefined;
   if (looksLikeYears) opt = f.options.find((o) => o.label.trim() === String(year) || o.value === String(year));
-  else if (looksLikeMonths) {
+  else if (looksLikeMonths && month !== undefined) {
     const name = monthName(month).toLowerCase();
     opt = f.options.find((o) => o.label.trim().toLowerCase().startsWith(name.slice(0, 3)) || o.label.trim() === String(month) || o.label.trim() === String(month).padStart(2, "0") || o.value === String(month));
   }
   const base = { id: f.id, selector: f.selector, kind: f.kind, label: f.label, required: f.required };
-  if (!opt) return { ...base, action: "review", key: isStart ? "education_start_date" : "graduation_date", value: null, optionLabel: null, confidence: 0.4, note: `education ${isStart ? "start" : "end"} date, no matching option for ${monthName(month)} ${year}` };
+  if (!opt) return { ...base, action: "review", key: isStart ? "education_start_date" : "graduation_date", value: null, optionLabel: null, confidence: 0.4, note: `education ${isStart ? "start" : "end"} date, no matching option for ${month ? monthName(month) : "unknown month"} ${year ?? "unknown year"}` };
   return { ...base, action: "fill", key: isStart ? "education_start_date" : "graduation_date", value: f.kind === "select" ? opt.value : opt.label, optionLabel: opt.label, confidence: 1, note: "degree date from the profile" };
 }
 
@@ -302,7 +302,7 @@ export function employmentDatePlan(f: DumpedField, previous: DumpedField[], prof
     const opt = part === "year"
       ? f.options.find((o) => o.label.trim() === year || o.value === year)
       : f.options.find((o) => o.label.trim().toLowerCase().startsWith(name.slice(0, 3)) || o.label.trim() === String(month) || o.label.trim() === String(month).padStart(2, "0") || o.value === String(month));
-    if (!opt) return { ...base, action: "review", key, value: null, confidence: 0.4, note: `work history ${isStart ? "start" : "end"} date, no matching option for ${monthName(month)} ${year}` };
+    if (!opt) return { ...base, action: "review", key, value: null, confidence: 0.4, note: `work history ${isStart ? "start" : "end"} date, no matching option for ${month ? monthName(month) : "unknown month"} ${year ?? "unknown year"}` };
     return { ...base, action: "fill", key, value: f.kind === "select" ? opt.value : opt.label, optionLabel: opt.label, confidence: 1, note };
   }
   if (part === "year" && (f.kind === "text" || f.kind === "number")) return { ...base, action: "fill", key, value: year, confidence: 1, note };

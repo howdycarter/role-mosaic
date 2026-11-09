@@ -1,0 +1,24 @@
+{
+  "titleLevels": [
+    "vp",
+    "vice president",
+    "director",
+    "head",
+    "chief",
+    "staff",
+    "principal"
+  ],
+  "titleFields": [
+    "product",
+    "design",
+    "experience",
+    "ux",
+    "user experience",
+    "research",
+    "engineering",
+    "engineer"
+  ],
+  "localCities": [],
+  "remoteCountry": "United States",
+  "minAnnualBaseUsd": 100000
+}

@@ -24,7 +24,7 @@ export const prettyMonth = (s: string) => {
 };
 const span = (start: string, end: string, current: boolean) => `${prettyMonth(start)} to ${current ? "present" : prettyMonth(end)}`;
 
-const monthYear = (month: number, year: number) => `${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month - 1] ?? ""} ${year}`.trim();
+const monthYear = (month: number | undefined, year: number | undefined) => `${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][ (month ?? 0) - 1] ?? ""} ${year ?? ""}`.trim();
 
 /** Everything a resume template may print, already in words: dates as "May 2026", the contact line joined. */
 export function resumeView(profile: Profile, t: Tailored): View {
@@ -36,7 +36,7 @@ export function resumeView(profile: Profile, t: Tailored): View {
     const src = profile.projects.find((x) => x.name.toLowerCase().includes(p.name.toLowerCase()) || p.name.toLowerCase().includes(x.name.toLowerCase()));
     return { name: p.name, role: src?.role ?? "", link: src?.link ? src.link.replace(/^https?:\/\/(www\.)?/, "") : "", when: src ? span(src.start, src.end, /present|current|now/i.test(src.end) || !src.end) : "", bullets: p.bullets };
   });
-  const education = profile.education.map((e) => ({ degree: e.degree, field: e.field, minor: e.minor ?? "", school: e.school, when: `${e.startYear} to ${e.status === "in_progress" ? "expected " : ""}${monthYear(e.gradMonth, e.gradYear)}` }));
+  const education = profile.education.map((e) => ({ degree: e.degree, field: e.field, minor: e.minor ?? "", school: e.school, when: `${e.startYear ? `${e.startYear} to ` : ""}${e.status === "in_progress" ? "expected " : ""}${monthYear(e.gradMonth, e.gradYear)}` }));
   return {
     name: `${profile.name.first} ${profile.name.last}`,
     headline: t.headline,

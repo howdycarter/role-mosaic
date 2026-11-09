@@ -20,6 +20,7 @@ import { applyUrlFor, hostIs, type Job } from "../jobs/normalize.js";
 import { loadQueue, mutateQueue, RUN_OWNED, sortEntries, updateEntry, type QueueEntry } from "../jobs/queue.js";
 import { withStore } from "../util/store.js";
 import { rememberWalledHost } from "../jobs/walled.js";
+import { historyRefusal } from "../jobs/history.js";
 import { learn, loadKnowledge } from "../knowledge/sites.js";
 import { loadRows, saveRows, takeHomeCell, upsertEntry } from "../log/csv.js";
 import { loadProfile, type Profile } from "../profile/schema.js";
@@ -74,6 +75,7 @@ export function pickJobs(entries: QueueEntry[], ids: string[], o: { count: numbe
       if (picked.length >= o.count) break;
       // A job that must wait for another day stays in the queue, untouched.
       if (gate(e.job.url)) continue;
+      if (process.env.CODEX_LEADERSHIP === "1" && historyRefusal(e.job)) continue;
       // Several roles at one employer: a run takes a few and leaves the rest for another day.
       const key = employerKey(e.job.company);
       if ((perEmployer.get(key) ?? 0) >= RUN.perEmployerPerRun) continue;
@@ -88,7 +90,9 @@ export function pickJobs(entries: QueueEntry[], ids: string[], o: { count: numbe
     const e = entries.find((x) => x.job.id === id);
     if (!e) throw new Error(`No queue entry ${id}`);
     const held = gate(e.job.url);
+    const history = process.env.CODEX_LEADERSHIP === "1" ? historyRefusal(e.job) : null;
     if (held) refused.push({ id, why: held });
+    else if (history) refused.push({ id, why: history });
     else if (o.dry) picked.push(e);
     else if (e.status === "submission_unknown") refused.push({ id, why: `Submit was clicked on this form before and no confirmation was seen. Settle it first: npx jev reconcile ${id}` });
     else if (e.status === "applied" && !o.resubmit) refused.push({ id, why: `already applied on ${e.appliedAt?.slice(0, 10) ?? "an earlier day"}. To send it again on purpose, add --resubmit` });
