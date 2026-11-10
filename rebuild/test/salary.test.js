@@ -1,4 +1,16 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';import {salaryFromText,ashbySalary,livePostingEvidence} from '../src/sources.js';
+test('explicit annual base salary shorthand retains full dollar values',()=>{
+ const pay=salaryFromText('Annual base compensation is $200k - 240k USD');assert.equal(pay?.min,200000);assert.equal(pay?.max,240000);
+ assert.equal(salaryFromText('Annual base compensation is $240k - 200k USD'),null);
+ assert.equal(salaryFromText('Annual total compensation is $200k - 240k USD'),null);
+});
+test('a US city-state base band uses only the already-authorized annual-period assumption',async()=>{
+ const job={url:'https://job-boards.greenhouse.io/example/jobs/123'},data={id:123,title:'Creative Director, Design',location:{name:'San Francisco, Los Angeles, Austin TX'},metadata:[{name:'Employment Type',value:'Full-time'}],content:'The target range of base compensation for this role is $200k - 240k.',pay_input_ranges:[]},fetcher=async()=>new Response(JSON.stringify(data));
+ assert.equal((await livePostingEvidence(job,fetcher)).compensation,null);
+ const pay=(await livePostingEvidence(job,fetcher,{allowAnnualBaseAssumption:true})).compensation;assert.equal(pay?.min,200000);assert.equal(pay?.max,240000);assert.equal(pay?.periodAssumed,true);
+ for(const location of ['Toronto, Canada','Austin TX and Toronto, Canada']){data.location.name=location;assert.equal((await livePostingEvidence(job,fetcher,{allowAnnualBaseAssumption:true})).compensation,null);}
+ data.location.name='Austin TX';data.content='Base compensation is $20k - 24k per month';assert.equal((await livePostingEvidence(job,fetcher,{allowAnnualBaseAssumption:true})).compensation,null);
+});
 test('Ashby public annual salary components exclude equity, bonus, OTE and foreign pay, using the lowest USD tier',()=>{
  const component=(min,currency='USD',type='Salary')=>({compensationType:type,interval:'1 YEAR',currencyCode:currency,minValue:min,maxValue:min+20000});
  const pay=ashbySalary({compensationTiers:[{components:[component(250000),component(50000,'USD','Bonus'),component(300000,'CAD')]},{components:[component(210000)]}]});assert.equal(pay.min,210000);assert.equal(pay.max,270000);

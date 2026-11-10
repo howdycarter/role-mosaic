@@ -6,16 +6,16 @@ export function ashbySalary(compensation){
  return {min:Math.min(...salary.map(c=>c.minValue)),max:Math.max(...salary.map(c=>c.maxValue)),currency:'USD',interval:'year',evidence:'Employer Ashby API: minimum across all published USD annual Salary tiers; Bonus/Equity excluded'};
 }
 function ashbyLocation(job){const countries=[job.address?.postalAddress?.addressCountry,...(job.secondaryLocations||[]).map(l=>l.address?.addressCountry)].filter(Boolean);return job.isRemote&&countries.some(c=>/^(United States|USA|US)$/i.test(c))?'Remote, United States':job.location||'';}
-const usLocation=location=>/\b(?:United States|USA|US)\b/i.test(location||'')&&!/\bCanada|Europe|United Kingdom|Australia\b/i.test(location||'');
+const usLocation=location=>(/\b(?:United States|USA|US)\b/i.test(location||'')||/\b[A-Z][a-z]+(?: [A-Z][a-z]+)*,?\s+(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b/.test(location||''))&&!/\bCanada|Europe|United Kingdom|Australia\b/i.test(location||'');
 const otherPeriod=/\b(?:hourly|monthly|weekly|daily|CAD|AUD|GBP|EUR)\b|per\s+(?:hour|month|week|day)\b/i;
 export function salaryFromText(raw,{allowAnnualBaseAssumption=false,location}={}) {
  const text=String(raw).replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/<[^>]*>/g,' ').replace(/&nbsp;|&#160;/g,' ').replace(/&(?:amp;)?mdash;/g,'—').replace(/&(?:amp;)?ndash;/g,'–').replace(/&#36;|&dollar;/g,'$').replace(/\s+/g,' ');
  const assumption=allowAnnualBaseAssumption===true&&usLocation(location);
- const m=text.match(/(?:annual\s+)?base\s+(?:salary|pay|compensation)[^.]{0,90}?\$([\d,]+)\s*(?:-|–|—|to)\s*\$([\d,]+)/i)|| (assumption?text.match(/\$([\d,]+)\s*(?:-|–|—|to)\s*\$([\d,]+)\s+base\s+(?:salary|pay|compensation)/i):null);
+ const m=text.match(/(?:annual\s+)?base\s+(?:salary|pay|compensation)[^.]{0,90}?\$([\d,]+(?:\.\d+)?)(k?)\s*(?:-|–|—|to)\s*\$?([\d,]+(?:\.\d+)?)(k?)\b/i)|| (assumption?text.match(/\$([\d,]+(?:\.\d+)?)(k?)\s*(?:-|–|—|to)\s*\$?([\d,]+(?:\.\d+)?)(k?)\s+base\s+(?:salary|pay|compensation)/i):null);
  if(!m)return null;const context=text.slice(Math.max(0,m.index-50),m.index+m[0].length+90);
  const annual=/\b(annual|annually|per year|yearly|a year)\b/i.test(context);
  if((!annual&&!assumption)||otherPeriod.test(context))return null;
- const min=Number(m[1].replaceAll(',','')),max=Number(m[2].replaceAll(',',''));if(min<1000||max<min)return null;
+ const min=Number(m[1].replaceAll(',',''))*(m[2]?1000:1),max=Number(m[3].replaceAll(',',''))*(m[4]?1000:1);if(min<1000||max<min)return null;
  return {min,max,currency:'USD',interval:'year',...(!annual?{periodAssumed:true}:{}),evidence:m[0]+(!annual?' — applicant-authorized conventional US annual-base assumption':'')};
 }
 export async function fetchBoard(board, fetcher = fetch) {
