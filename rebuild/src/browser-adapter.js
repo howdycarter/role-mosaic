@@ -103,8 +103,8 @@ export class CodexBrowserAdapter {
   await inspection.tab.playwright.getByRole('button',{name:inspection.form.submit.label,exact:true}).click();
   await inspection.tab.ax.get('state');
  }
- async confirm(inspection){
-  const deadline=Date.now()+8000;
+ async confirm(inspection,{waitMs=8000}={}){
+  const deadline=Date.now()+waitMs;
   do{
    const text=String(await inspection.tab.ax.get('state',{disableDiffing:true}));
    const page=await inspection.tab.playwright.evaluate(()=>({url:location.href,hasInputs:[...document.querySelectorAll('input,textarea,select')].some(e=>e.type!=='hidden'&&e.type!=='file'&&e.getAttribute('aria-hidden')!=='true'&&e.getClientRects().length>0),hasSubmit:[...document.querySelectorAll('button,input[type="submit"]')].some(e=>e.getClientRects().length>0&&/^(submit(?: application)?|send application)$/i.test((e.innerText||e.value||'').trim()))}));

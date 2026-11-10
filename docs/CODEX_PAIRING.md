@@ -18,6 +18,12 @@ If the applicant's existing search includes Staff or Principal levels, a substan
 
 ## Receipts and human exceptions
 
+For a Greenhouse email challenge, Mosaic can continue the original live form through **Complete email verification**. Obtain actual authorization for that employer's code before using the local UI or `POST /api/application-verify-email`. The authenticated loopback request takes `attemptId`, `code`, a unique `requestId`, `confirm: "complete-existing-email-verification"`, and `evidence` describing the actual authorization. Never put a code into the evidence, a profile, a shell argument, a log, or Git. The UI clears its code input after each operation. An agent can transfer an authorized code in memory through a private pipe to its local client.
+
+The engine requires a checkpoint captured before the original final action, the same owned browser tab, unchanged non-code fields and attachment evidence, and eight visible expected code controls. It enters only those controls and performs one verification activation. It never reopens or refills a form. Repeating a request ID returns the recorded result without another activation. A missing page, changed application, absent checkpoint, or uncertain earlier verification action remains held. A provider's explicit invalid-code response permits a newly authorized fresh code in the same preserved challenge; it does not authorize restarting the application.
+
+**Refresh employer confirmations**, or `POST /api/application-reconcile`, performs a passive receipt check. It does not run discovery, prepare packets, create browser tabs or submit anything. Native recovery uses the original page where available, or a unique matching existing page for read-only confirmation; ambiguous matching tabs remain unknown.
+
 Unknown after Submit stays unknown until an employer receipt is observed. A filled form, HTTP 200 response, successful tool call or absent confirmation email is not proof of receipt or non-submission. Never retry an uncertain application. Preserve verification windows: restarting Chrome can lose their state. Human verification and account access can require a handoff despite standing application authorization.
 
 The native transport saves bounded submission diagnostics containing response origins, paths, methods and HTTP status only. It does not record request bodies, headers, query strings, passwords or verification codes. Held review withholds code-like input values. These files belong in the private applicant workspace, never Git.

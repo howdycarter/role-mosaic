@@ -1,6 +1,6 @@
 import {open,unlink,mkdir} from 'node:fs/promises';
 import path from 'node:path';
-import {ApplicationStore,prepareApplications,runApplications,reconcileApplications,postingKey,authorizationMatches,standingAuthorizationMatches,supportedPosting,individualContributorReviewed} from './applications.js';
+import {ApplicationStore,prepareApplications,runApplications,reconcileApplications,postingKey,authorizationMatches,standingAuthorizationMatches,supportedPosting,individualContributorReviewed,continueApplicationVerification} from './applications.js';
 import {evaluate,mergeJobs,historyMatch,reapplicationHistory} from './core.js';
 import {fetchBoard} from './sources.js';
 import {campaignProgress} from './campaign.js';
@@ -108,7 +108,7 @@ export class MosaicWorker {
   if(this.running)throw Error('Wait for the current worker operation');
   const attempt=(await this.store.read('application-ledger.json',[])).find(a=>a.id===attemptId);
   if(!attempt||!['held','submission_unknown'].includes(attempt.status))throw Error('Choose a held or uncertain attempt');
-  const adapter=await this.browser(),page=adapter.nativeTabs?.find(attempt.url);
+  const adapter=await this.browser(),page=adapter.preservedPage?.(attempt);
   if(!page)throw Error('Preserved browser page unavailable; no new form was opened');
   await page.bringToFront();
   const directory=path.join(this.home,'receipts');await mkdir(directory,{recursive:true,mode:0o700});
@@ -117,5 +117,19 @@ export class MosaicWorker {
   await page.screenshot({path:screenshot,fullPage:true,mask:[verificationInputs]});
   const review=await page.evaluate(()=>({visibility:document.visibilityState,focused:document.hasFocus(),visibleOptions:[...document.querySelectorAll('[role="option"]')].filter(e=>e.getClientRects().length).map(e=>e.textContent.trim()),fields:[...document.querySelectorAll('input:not([type="hidden"]):not([type="password"]),select,textarea')].filter(e=>e.getClientRects().length).map(e=>({id:e.id,label:[...(e.labels||[])].map(l=>l.textContent.trim()).join(' '),required:e.required||e.getAttribute('aria-required')==='true',value:e.type==='file'?'':e.autocomplete==='one-time-code'||e.maxLength===1||/verification|security.?code|one.?time|\botp\b|password|api.?key|token/i.test(e.id+' '+e.name+' '+e.getAttribute('aria-label'))?'[verification value withheld]':e.value||e.closest('[class*="select__control"]')?.querySelector('[class*="single-value"], [class*="singleValue"]')?.textContent||''})),alerts:[...document.querySelectorAll('[role="alert"]')].filter(e=>e.getClientRects().length).map(e=>e.innerText.slice(0,300)),captchaFrames:[...document.querySelectorAll('iframe')].filter(e=>/captcha|challenge/i.test(e.title)).map(e=>({title:e.title,visibility:getComputedStyle(e).visibility,rect:{x:e.getBoundingClientRect().x,y:e.getBoundingClientRect().y,width:e.getBoundingClientRect().width,height:e.getBoundingClientRect().height},parentVisibility:getComputedStyle(e.parentElement).visibility,parentDisplay:getComputedStyle(e.parentElement).display}))}));
   await this.store.write('worker-held-review.json',{attemptId,screenshot,...review});return {attemptId,screenshot,...review};
+ }
+ async verifyEmail(data){
+  if(this.running)throw Error('Wait for the current worker operation');
+  if(!this.adapter)throw Error('Original verification browser unavailable; no new form was opened');
+  const lock=path.join(this.home,'worker-run.lock'),handle=await open(lock,'wx',0o600);await handle.writeFile(JSON.stringify({pid:process.pid,operation:'existing email verification',at:new Date().toISOString()}));await handle.close();
+  this.running=true;this.status.state='verifying';this.status.stage='completing existing email verification';await this.persist();
+  try{return await continueApplicationVerification({...data,home:this.home,adapter:this.adapter});}
+  finally{this.running=false;this.status.state=this.paused?'paused':'idle';this.status.stage='verification check finished';await this.persist();await unlink(lock);}
+ }
+ async reconcileReceipts(){
+  if(this.running)throw Error('Wait for the current worker operation');
+  const lock=path.join(this.home,'worker-run.lock'),handle=await open(lock,'wx',0o600);await handle.writeFile(JSON.stringify({pid:process.pid,operation:'read-only receipt recovery'}));await handle.close();this.running=true;
+  try{const adapter=this.adapter||{recoverReceipt:async a=>({confirmed:false,posting:a.url})};const result=await reconcileApplications({home:this.home,adapter});this.status.reconciled=result;this.status.campaign=await campaignProgress({home:this.home});return result;}
+  finally{this.running=false;await this.persist();await unlink(lock);}
  }
 }

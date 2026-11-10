@@ -256,9 +256,11 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
     if(!await shouldContinue()){attempt.status='held';attempt.reason='Worker paused before submission';await save();results.push({...attempt});continue;}
     const current=await prerequisites(store,now());
     if(current.resumeSha256!==packet.resumeSha256||current.profileSha256!==packet.profileSha256||current.searchSha256!==packet.searchSha256||!applicationAuthorization(current.policy,packet,adapter,await store.read('application-approvals.json',[]),now())||duplicate(packet.job,current.history,attempts.filter(a=>a.id!==attempt.id),current.reapplicationReviews))throw Error('Submission authorization or applicant state changed');
+    attempt.verificationCheckpoint=await adapter.captureVerificationCheckpoint?.(activeInspection);
     attempt.status='submission_unknown';await save(); // Durable BEFORE the only final click.
     await adapter.submit(activeInspection);
     const receipt=await adapter.confirm(activeInspection);
+    if(receipt?.emailVerificationPending)attempt.emailVerificationPending=true;
     if(receipt?.transportEvidence)attempt.submissionEvidence=receipt.transportEvidence;
     if(receipt?.confirmed===true&&receipt.text&&samePosting(receipt.posting,packet.job.url)){
      attempt.status='submitted';attempt.reason=null;attempt.receipt={...receipt,verifiedAt:now().toISOString(),resumeSha256:ctx.resumeSha256};await save();
@@ -282,6 +284,39 @@ export async function approvePackets({home,ids,now=()=>new Date()}) {
  await store.write('application-approvals.json',[...old.filter(a=>!approvals.some(b=>a.packetDigest===b.packetDigest)),...approvals]);return {approved:approvals.length};
 }
 /** Receipt-only recovery: this never fills, clicks, or retries a submission. */
+/** Continue a visible email challenge; never reopen, refill or retry an application. */
+export async function continueApplicationVerification({home,adapter,attemptId,code,requestId,evidence,now=()=>new Date()}){
+ if(adapter?.transport!=='playwright'||typeof adapter.continueEmailVerification!=='function')throw Error('Email continuation requires the original native browser');
+ if(typeof code!=='string'||!/^[A-Za-z0-9]{8}$/.test(code)||typeof requestId!=='string'||!/^[A-Za-z0-9-]{12,80}$/.test(requestId))throw Error('An eight-character code and unique request identifier are required');
+ if(typeof evidence!=='string'||!evidence.trim()||evidence.length>2000||evidence.includes(code))throw Error('Record actual authorization without including the verification code');
+ const store=new ApplicationStore(home);
+ const result=await store.lock(async()=>{
+  const ledger=await store.read('application-ledger.json',[]),attempt=ledger.find(a=>a.id===attemptId);
+  if(!attempt)throw Error('Application attempt not found');
+  const previous=attempt.verificationActions?.find(a=>a.requestId===requestId);
+  if(previous)return {attemptId,status:attempt.status,verificationOutcome:previous.outcome,idempotent:true};
+  if(attempt.status!=='submission_unknown'||!attempt.verificationCheckpoint||attempt.emailVerificationPending!==true)throw Error('No checkpointed pending email verification; no application was reopened');
+  const last=attempt.verificationActions?.at(-1);
+  if(last&&!['blocked-before-activation','invalid-code'].includes(last.outcome))throw Error('Previous verification outcome is uncertain; reconcile without another activation');
+  const action={requestId,authorizedAt:now().toISOString(),evidence:evidence.trim(),outcome:'checking',activationStarted:false};
+  (attempt.verificationActions||=[]).push(action);await store.write('application-ledger.json',ledger);
+  try{
+   const completed=await adapter.continueEmailVerification(attempt,code,{beforeActivate:async()=>{action.activationStarted=true;action.outcome='unconfirmed';await store.write('application-ledger.json',ledger)}});
+   action.outcome=completed.outcome;
+   if(completed.receipt?.confirmed&&completed.receipt.text&&samePosting(completed.receipt.posting,attempt.url)){
+    attempt.status='submitted';attempt.reason=null;attempt.receipt={...completed.receipt,verifiedAt:now().toISOString(),resumeSha256:attempt.resumeSha256};
+   }
+   action.completedAt=now().toISOString();await store.write('application-ledger.json',ledger);
+   return {attemptId,status:attempt.status,verificationOutcome:action.outcome};
+  }catch{
+   action.outcome=action.activationStarted?'unconfirmed':'blocked-before-activation';action.completedAt=now().toISOString();await store.write('application-ledger.json',ledger);
+   throw Error(action.activationStarted?'Email verification outcome is uncertain; no retry was performed':'Email verification stopped before activation; original page or unchanged-form checks failed');
+  }
+ });
+ if(result.status==='submitted')await reconcileApplications({home,adapter,now});
+ return result;
+}
+
 export async function reconcileApplications({home,adapter,now=()=>new Date()}) {
  const store=new ApplicationStore(home);
  return store.lock(async()=>{
@@ -289,9 +324,9 @@ export async function reconcileApplications({home,adapter,now=()=>new Date()}) {
   for(const attempt of ledger.filter(a=>a.status==='submission_unknown'||a.status==='submitted'&&a.receipt?.confirmed)){
    try{
     const job={id:attempt.jobId,title:attempt.title,company:attempt.company,url:attempt.url};
-    const inspection=attempt.status==='submitted'?null:await adapter.inspect(job,{tabId:attempt.tabId});
-    const receipt=attempt.status==='submitted'?attempt.receipt:await adapter.confirm(inspection);
-    if(!receipt?.confirmed||!receipt.text||!samePosting(receipt.posting,attempt.url)){results.push({jobId:attempt.jobId,status:'submission_unknown'});continue;}
+    const inspection=attempt.status==='submitted'||adapter.recoverReceipt?null:await adapter.inspect(job,{tabId:attempt.tabId});
+    const receipt=attempt.status==='submitted'?attempt.receipt:adapter.recoverReceipt?await adapter.recoverReceipt(attempt):await adapter.confirm(inspection);
+    if(!receipt?.confirmed||!receipt.text||!samePosting(receipt.posting,attempt.url)){if(receipt?.emailVerificationPending&&attempt.verificationCheckpoint&&!attempt.emailVerificationPending){attempt.emailVerificationPending=true;await store.write('application-ledger.json',ledger);}results.push({jobId:attempt.jobId,status:'submission_unknown'});continue;}
     attempt.status='submitted';attempt.reason=null;attempt.receipt={...receipt,verifiedAt:now().toISOString(),resumeSha256:attempt.resumeSha256};attempt.updatedAt=now().toISOString();await store.write('application-ledger.json',ledger);
     const history=await store.read('history.json',[]);if(!history.some(r=>r.receiptId===attempt.id)){history.push({company:attempt.company,role:attempt.title,posting:attempt.url,status:'submitted',submittedAt:now().toISOString(),receiptId:attempt.id});await store.write('history.json',history);}
     const jobs=await store.read('jobs.json',[]),jobRecord=jobs.find(j=>j.id===attempt.jobId);if(jobRecord){jobRecord.status='applied';jobRecord.receiptId=attempt.id;await store.write('jobs.json',jobs);}

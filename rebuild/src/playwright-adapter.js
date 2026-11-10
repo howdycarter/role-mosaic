@@ -151,8 +151,40 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   this.clearSubmissionListeners=()=>{page.off('response',response);page.off('requestfailed',failed)};
   try{await super.submit(inspection);}catch(e){this.clearSubmissionListeners();throw e;}
  }
- async confirm(inspection){
-  try{const result=await super.confirm(inspection);return {...result,transportEvidence:this.submissionEvidence?.jobId===inspection.job.id?this.submissionEvidence:undefined};}finally{this.clearSubmissionListeners?.();this.clearSubmissionListeners=null;}
+ async confirm(inspection,options){
+  try{const result=await super.confirm(inspection,options);const emailVerificationPending=!result.confirmed&&await inspection.tab.page.evaluate(()=>Array.from({length:8},(_,n)=>document.getElementById('security-input-'+n)).every(e=>e&&e.getClientRects().length>0));return {...result,emailVerificationPending,transportEvidence:this.submissionEvidence?.jobId===inspection.job.id?this.submissionEvidence:undefined};}finally{this.clearSubmissionListeners?.();this.clearSubmissionListeners=null;}
+ }
+ preservedPage(attempt,{exact=false}={}){
+  const matches=p=>{try{return !p.isClosed()&&postingKey(p.url())===postingKey(attempt.url)&&new URL(p.url()).origin===new URL(attempt.url).origin;}catch{return false}};
+  const remembered=this.nativeTabs.byId.get(attempt.tabId)?.page;
+  if(remembered&&matches(remembered))return remembered;
+  if(exact)return null;
+  const pages=this.context.pages().filter(matches);
+  return pages.length===1?pages[0]:null;
+ }
+ async recoverReceipt(attempt){
+  const page=this.preservedPage(attempt);if(!page)return {confirmed:false,posting:attempt.url};
+  const tab=this.nativeTabs.wrap(page);
+  return this.confirm({job:{id:attempt.jobId,title:attempt.title,url:attempt.url},tab,tabId:tab.id},{waitMs:0});
+ }
+ async captureVerificationCheckpoint(inspection){
+  if(!['job-boards.greenhouse.io','boards.greenhouse.io'].includes(new URL(inspection.job.url).hostname))return null;
+  const fields=await inspection.tab.page.evaluate(()=>[...document.querySelectorAll('input,textarea,select,[aria-pressed],[role="radio"],[role="checkbox"]')].filter(e=>!['hidden','password'].includes(e.type)&&!/^security-input-[0-7]$/.test(e.id)&&e.autocomplete!=='one-time-code').map(e=>({id:e.id,name:e.name,type:e.type||e.getAttribute('role'),value:e.value,checked:['radio','checkbox'].includes(e.type)?e.checked:e.getAttribute('aria-checked'),pressed:e.getAttribute('aria-pressed'),files:e.type==='file'?[...e.files].map(f=>({name:f.name,size:f.size,lastModified:f.lastModified})):undefined,selected:e.closest('[class*="select__control"]')?.querySelector('[class*="single-value"],[class*="singleValue"]')?.textContent||''})));
+  return {fieldsSha256:digest(fields),resumeSha256:this.uploads[inspection.job.id]?.sha256||null};
+ }
+ async continueEmailVerification(attempt,code,{beforeActivate}){
+  const page=this.preservedPage(attempt,{exact:true});if(!page)throw Error('Original verification page unavailable');
+  const tab=this.nativeTabs.byId.get(attempt.tabId),inspection={job:{id:attempt.jobId,title:attempt.title,url:attempt.url},tab,tabId:attempt.tabId};
+  const original=attempt.verificationCheckpoint,current=await this.captureVerificationCheckpoint(inspection),upload=this.uploads[attempt.jobId];
+  if(!current||current.fieldsSha256!==original.fieldsSha256||!upload||current.resumeSha256!==attempt.resumeSha256||upload.sha256!==attempt.resumeSha256||!(await page.locator('body').innerText()).includes(upload.filename))throw Error('Original application changed');
+  for(let n=0;n<8;n++){const field=page.locator('#security-input-'+n);if(await field.count()!==1||!await field.isVisible()||await field.getAttribute('maxlength')!=='1')throw Error('Expected email challenge unavailable');}
+  for(let n=0;n<8;n++)await page.locator('#security-input-'+n).fill(code[n]);
+  for(let n=0;n<8;n++)if(await page.locator('#security-input-'+n).inputValue()!==code[n])throw Error('Verification readback failed');
+  if((await this.captureVerificationCheckpoint(inspection)).fieldsSha256!==original.fieldsSha256)throw Error('Application changed during verification');
+  const submit=page.getByRole('button',{name:/^submit application$/i});if(await submit.count()!==1||!await submit.isEnabled())throw Error('Verification control unavailable');
+  await beforeActivate();await submit.click();const receipt=await this.confirm(inspection);
+  const text=receipt.confirmed?'':await page.locator('body').innerText();
+  return {receipt,outcome:receipt.confirmed?'confirmed':/invalid security code|security code.*expired/i.test(text)?'invalid-code':'unconfirmed'};
  }
  async close(){this.clearSubmissionListeners?.();await this.context.close();}
 }
