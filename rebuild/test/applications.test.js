@@ -4,6 +4,42 @@ import {mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';
 import path from 'node:path';import os from 'node:os';
 import {ApplicationStore,digest,prepareApplications,runApplications,postingKey,salaryForLocation,fillPlan,dayAt,configureStandingAuthorization,answerFor} from '../src/applications.js';
 const now=()=>new Date('2026-11-09T18:00:00Z');
+test('explicit uncertain-restart exception preserves the original and permits only one fresh native attempt',async()=>{
+ const {authorizeUnknownRestart}=await import('../src/applications.js');assert.equal(typeof authorizeUnknownRestart,'function');
+ const f=await fixture();try{
+  f.adapter.transport='playwright';await configureStandingAuthorization({home:f.root,evidence:'Applicant automatic application authorization',now});
+  const original={id:'original-unknown',jobId:f.job.id,postingKey:postingKey(f.job.url),url:f.job.url,status:'submission_unknown',day:'2026-11-09',resumeSha256:digest(await readFile(path.join(f.root,'resume.pdf')))};
+  await f.store.write('application-ledger.json',[original]);assert.equal((await f.prepare()).packets.length,0);
+  const grant=await authorizeUnknownRestart({home:f.root,attemptId:original.id,evidence:'Applicant explicitly authorizes one restart despite possible duplicate',confirm:'one-restart-despite-duplicate-risk',now});
+  const plan=await prepareApplications({home:f.root,adapter:f.adapter,jobIds:[f.job.id],restartAuthorizationId:grant.id,now});assert.equal(plan.packets.length,1);
+  f.adapter.submit=async()=>f.events.push('submit');const r=await f.run();assert.equal(r[0].status,'submitted');
+  const ledger=await f.store.read('application-ledger.json');assert.deepEqual(ledger[0],original);assert.equal(ledger[1].restartsAttemptId,original.id);
+  const {reconcileApplications}=await import('../src/applications.js');f.adapter.recoverReceipt=async()=>({confirmed:true,posting:f.job.url,text:'Application received'});await reconcileApplications({home:f.root,adapter:f.adapter,now});assert.equal((await f.store.read('application-ledger.json'))[0].status,'submission_unknown');assert.equal((await f.store.read('history.json')).length,1);
+  assert.equal((await f.run())[0].status,'restart_authorization_held');assert.deepEqual(f.events,['fill','submit']);
+  await assert.rejects(authorizeUnknownRestart({home:f.root,attemptId:original.id,evidence:'Again',confirm:'one-restart-despite-duplicate-risk',now}));
+ }finally{await f.close();}
+});
+test('uncertain-restart exception cannot ignore a new receipt, changed scope, or the original quota reservation',async()=>{
+ const {authorizeUnknownRestart}=await import('../src/applications.js');assert.equal(typeof authorizeUnknownRestart,'function');
+ for(const change of ['receipt','scope','quota']){const f=await fixture();try{
+  f.adapter.transport='playwright';let policy=await f.store.read('application-policy.json');if(change==='quota')await f.store.write('application-policy.json',{...policy,maxPerDay:1});
+  await configureStandingAuthorization({home:f.root,evidence:'Applicant automatic application authorization',now});
+  await f.store.write('application-ledger.json',[{id:'original',jobId:f.job.id,postingKey:postingKey(f.job.url),url:f.job.url,status:'submission_unknown',day:'2026-11-09',resumeSha256:digest(await readFile(path.join(f.root,'resume.pdf')))}]);
+  const grant=await authorizeUnknownRestart({home:f.root,attemptId:'original',evidence:'Applicant explicitly authorizes one restart despite possible duplicate',confirm:'one-restart-despite-duplicate-risk',now});
+  const plan=await prepareApplications({home:f.root,adapter:f.adapter,jobIds:[f.job.id],restartAuthorizationId:grant.id,now});assert.equal(plan.packets.length,1);
+  if(change==='receipt'){const a=await f.store.read('application-ledger.json');a[0].status='submitted';await f.store.write('application-ledger.json',a);}
+  if(change==='scope'){policy=await f.store.read('application-policy.json');await f.store.write('application-policy.json',{...policy,maxPerDay:14});}
+  assert.equal((await f.run())[0].status,change==='quota'?'daily_limit':'restart_authorization_held');assert.deepEqual(f.events,[]);
+ }finally{await f.close();}}
+});
+test('a held recovery continues the same pre-submit attempt without authorizing a second restart',async()=>{
+ const {authorizeUnknownRestart}=await import('../src/applications.js');const f=await fixture();try{
+ f.adapter.transport='playwright';await configureStandingAuthorization({home:f.root,evidence:'Explicit automatic search authorization',now});await f.store.write('application-ledger.json',[{id:'original',jobId:f.job.id,url:f.job.url,postingKey:postingKey(f.job.url),status:'submission_unknown',day:'2026-11-09',resumeSha256:digest(await readFile(path.join(f.root,'resume.pdf')))}]);
+ const grant=await authorizeUnknownRestart({home:f.root,attemptId:'original',evidence:'Explicit one-restart duplicate-risk exception',confirm:'one-restart-despite-duplicate-risk',now});await prepareApplications({home:f.root,adapter:f.adapter,jobIds:[f.job.id],restartAuthorizationId:grant.id,now});
+ f.adapter.verify=async()=>({ok:false,reason:'Widget needs repair'});const held=(await f.run())[0];assert.equal(held.status,'held');
+ f.adapter.verify=async()=>({ok:true});f.adapter.submit=async()=>f.events.push('submit');const r=await runApplications({home:f.root,adapter:f.adapter,resumeAttemptId:held.id,now});assert.equal(r[0].status,'submitted');assert.equal(r[0].id,held.id);assert.equal((await f.store.read('application-ledger.json')).length,2);
+ }finally{await f.close();}
+});
 test('compound authorization without sponsorship is affirmative for an authorized non-sponsored US applicant',()=>{const p={facts:{authorizedUS:true,requiresSponsorshipUS:false}};assert.equal(answerFor({label:'Are you legally authorized to work in the United States without requiring sponsorship now or in the future?'},p),'Yes');assert.equal(answerFor({label:'Will you require visa sponsorship?',countryContext:'US'},p),'No');assert.equal(answerFor({label:'Will you require visa sponsorship in Canada?',countryContext:'US'},p),undefined);assert.equal(answerFor({label:'If you require sponsorship now or in the future, please provide more detail.',countryContext:'US'},p),undefined);});
 async function fixture(){
  const root=await mkdtemp(path.join(os.tmpdir(),'mosaic-auto-')),store=new ApplicationStore(root),resume=path.join(root,'resume.pdf');

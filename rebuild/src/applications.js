@@ -140,6 +140,28 @@ function duplicate(job,history,attempts,reviews=[]) {
  const key=postingKey(job.url);
  return !!historyMatch(job,history)||history.some(r=>{try{return r.posting&&postingKey(r.posting)===key;}catch{return false;}})||attempts.some(a=>a.postingKey===key&&a.status!=='preflight_hold');
 }
+function restartScope(ctx){return digest({resume:ctx.resumeSha256,profile:ctx.profileSha256,search:ctx.searchSha256,authorization:ctx.policy.standingAuthorization});}
+async function restartException(store,id,job,ctx,attempts,adapter,at,currentAttemptId){
+ if(!id||!standingAuthorizationMatches(ctx.policy,ctx,adapter))return null;
+ const g=(await store.read('application-restart-authorizations.json',[])).find(g=>g.id===id);
+ if(!g||!g.evidence||g.postingKey!==postingKey(job.url)||g.jobId!==job.id||g.scopeDigest!==restartScope(ctx)||Date.parse(g.expiresAt)<=at.getTime()||g.usedByAttemptId&&g.usedByAttemptId!==currentAttemptId)return null;
+ const original=attempts.find(a=>a.id===g.attemptId);
+ if(!original||original.status!=='submission_unknown'||original.receipt?.confirmed||original.resumeSha256!==ctx.resumeSha256||attempts.some(a=>a.postingKey===g.postingKey&&a.id!==original.id&&a.id!==currentAttemptId&&a.status!=='preflight_hold'))return null;
+ if(duplicate(job,ctx.history,attempts.filter(a=>a.id!==original.id&&a.id!==currentAttemptId),ctx.reapplicationReviews))return null;
+ return g;
+}
+/** Explicit applicant exception only; scheduler never creates or selects these grants. */
+export async function authorizeUnknownRestart({home,attemptId,evidence,confirm,now=()=>new Date()}){
+ if(confirm!=='one-restart-despite-duplicate-risk'||typeof evidence!=='string'||!evidence.trim())throw Error('Explicit applicant consent to the duplicate risk is required');
+ const store=new ApplicationStore(home);return store.lock(async()=>{
+  const ctx=await prerequisites(store,now()),attempts=await store.read('application-ledger.json',[]),original=attempts.find(a=>a.id===attemptId),grants=await store.read('application-restart-authorizations.json',[]);
+  if(!original||original.status!=='submission_unknown'||original.receipt?.confirmed||grants.some(g=>g.attemptId===attemptId)||attempts.some(a=>a.restartsAttemptId===attemptId))throw Error('Original unknown attempt is unavailable or its one restart was already authorized');
+  const job=(await store.read('jobs.json',[])).find(j=>j.id===original.jobId);
+  if(!job||postingKey(job.url)!==original.postingKey||original.resumeSha256!==ctx.resumeSha256||!standingAuthorizationMatches(ctx.policy,ctx,{transport:'playwright'})||duplicate(job,ctx.history,attempts.filter(a=>a.id!==original.id),ctx.reapplicationReviews))throw Error('Restart requires the original approved PDF, current native authorization and no other application or receipt');
+  const g={id:randomUUID(),attemptId,jobId:job.id,postingKey:original.postingKey,scopeDigest:restartScope(ctx),evidence:evidence.trim(),authorizedAt:now().toISOString(),expiresAt:new Date(now().getTime()+2*60*60*1000).toISOString()};
+  grants.push(g);await store.write('application-restart-authorizations.json',grants);return g;
+ });
+}
 function historyUsed(history,day,timezone,attempts){
  const ids=new Set(attempts.map(a=>a.id));
  return history.filter(r=>{
@@ -176,13 +198,15 @@ function packetFromInspection(job,inspection,ctx,at) {
  packet.digest=digest(packet);return packet;
 }
 /** Inspect only: no contact fields, uploads or final buttons are touched. */
-export async function prepareApplications({home,adapter,limit=15,jobIds,now=()=>new Date()}) {
+export async function prepareApplications({home,adapter,limit=15,jobIds,restartAuthorizationId,now=()=>new Date()}) {
  const store=new ApplicationStore(home),ctx=await prerequisites(store,now()),jobs=await store.read('jobs.json',[]),attempts=await store.read('application-ledger.json',[]);
  const packets=[],held=[];
  for(const job of jobs){
   if(jobIds&&!jobIds.includes(job.id))continue;
   if(packets.length>=Math.min(limit,ctx.policy.maxPerDay))break;
-  if(!supportedPosting(job.url)||duplicate(job,ctx.history,attempts,ctx.reapplicationReviews)||['applied','dismissed','rejected'].includes(job.status))continue;
+  const restart=await restartException(store,restartAuthorizationId,job,ctx,attempts,adapter,now());
+  if(restartAuthorizationId&&!restart)continue;
+  if(!supportedPosting(job.url)||!restart&&duplicate(job,ctx.history,attempts,ctx.reapplicationReviews)||['applied','dismissed','rejected'].includes(job.status))continue;
   const preliminary=evaluate({...job,compensation:job.compensation||{min:ctx.search.minAnnualBaseUsd,currency:'USD',interval:'year'}},ctx.search);
   if(preliminary.reasons.some(r=>!['Annual USD base compensation needs verification','Location needs review'].includes(r)))continue;
   if(!/director|vice president|\bvp\b|head|chief/i.test(job.title)&&ctx.policy.requireICReview!==false&&!individualContributorReviewed(job,ctx.policy,now())){held.push({id:job.id,company:job.company,title:job.title,reason:'Individual-contributor specialization requires review'});continue;}
@@ -194,6 +218,7 @@ export async function prepareApplications({home,adapter,limit=15,jobIds,now=()=>
   const plan=fillPlan(inspection.form,ctx.profile,{postingKey:postingKey(job.url),company:job.company});
   if(plan.missing.length){held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Missing verified answers or supported controls',questions:plan.missing});continue;}
   const packet={id:randomUUID(),job,tabId:inspection.tabId,createdAt:now().toISOString(),expiresAt:new Date(now().getTime()+60*60*1000).toISOString(),resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,searchSha256:ctx.searchSha256,formDigest:formDigest(inspection.form),salary:pay,location:inspection.location,fields:plan.actions.map(a=>a.field.label),answersPreview:plan.actions.map(a=>({question:a.field.label,answer:a.value})),resumeFilename:path.basename(ctx.connections.resume)};
+  if(restart)packet.restartAuthorizationId=restart.id;
   packet.digest=digest(packet);packets.push(packet);
  }
  const result={createdAt:now().toISOString(),packets,held};await store.write('application-plan.json',result);return result;
@@ -212,8 +237,10 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
    const ctx=await prerequisites(store,now()),job=(await store.read('jobs.json',[])).find(j=>j.id===held.jobId);
    const scope={resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,searchSha256:ctx.searchSha256};
    if(!standingAuthorizationMatches(ctx.policy,scope,adapter))throw Error('Fresh held draft requires current native standing authorization');
-   if(!job||['applied','dismissed','rejected'].includes(job.status)||duplicate(job,ctx.history,ledger.filter(a=>a.id!==held.id),ctx.reapplicationReviews))throw Error('Held draft is no longer eligible');
+   const restart=job&&await restartException(store,held.restartAuthorizationId,job,ctx,ledger,adapter,now(),held.id);
+   if(!job||held.restartAuthorizationId&&!restart||['applied','dismissed','rejected'].includes(job.status)||!restart&&duplicate(job,ctx.history,ledger.filter(a=>a.id!==held.id),ctx.reapplicationReviews))throw Error('Held draft is no longer eligible');
    const inspection=await adapter.inspect(job),fresh=packetFromInspection(job,inspection,ctx,now());
+   if(restart){fresh.restartAuthorizationId=restart.id;fresh.digest=digest(Object.fromEntries(Object.entries(fresh).filter(([k])=>k!=='digest')));}
    (held.draftRefreshes||=[]).push({at:now().toISOString(),previousPacketDigest:held.packetDigest,previousTabId:held.tabId,packetDigest:fresh.digest,grantId:ctx.policy.standingAuthorization.id});
    if(held.tabId!==fresh.tabId)held.browserEvidence=null;
    held.packetDigest=fresh.digest;held.tabId=fresh.tabId;
@@ -226,7 +253,9 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
    if(packet.digest!==digest(Object.fromEntries(Object.entries(packet).filter(([k])=>k!=='digest')))||packet.resumeSha256!==ctx.resumeSha256||packet.profileSha256!==ctx.profileSha256||packet.searchSha256!==ctx.searchSha256||Date.parse(packet.expiresAt)<=at.getTime())throw Error('Application packet changed or expired; prepare and authorize again');
    const resumed=resumeAttemptId?attempts.find(a=>a.id===resumeAttemptId&&a.status==='held'&&a.packetDigest===packet.digest):null;
    if(resumeAttemptId&&!resumed)continue;
-   if(duplicate(packet.job,ctx.history,attempts.filter(a=>a.id!==resumed?.id),ctx.reapplicationReviews)){results.push({jobId:packet.job.id,status:'duplicate_held'});continue;}
+   const restart=await restartException(store,packet.restartAuthorizationId,packet.job,ctx,attempts,adapter,at,resumed?.id);
+   if(packet.restartAuthorizationId&&!restart){results.push({jobId:packet.job.id,status:'restart_authorization_held'});continue;}
+   if(!restart&&duplicate(packet.job,ctx.history,attempts.filter(a=>a.id!==resumed?.id),ctx.reapplicationReviews)){results.push({jobId:packet.job.id,status:'duplicate_held'});continue;}
    const day=dayAt(at,ctx.policy.timezone),today=attempts.filter(a=>a.day===day),imported=historyUsed(ctx.history,day,ctx.policy.timezone,attempts);
    const quota=ctx.policy.authorizationMode==='search-rules'?today.filter(a=>['submitted','submission_unknown'].includes(a.status)).length:today.length-(resumed?.day===day?1:0);
    if(quota+imported>=ctx.policy.maxPerDay){results.push({status:'daily_limit'});break;}
@@ -239,7 +268,9 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
    const fit=evaluate({...packet.job,location:inspection.location,compensation:inspectionSalary(inspection,ctx.profile.facts.stateCode)},ctx.search),actions=fillPlan(inspection.form,ctx.profile,{postingKey:key,company:packet.job.company});
    if(!inspection.titleVerified||inspection.closed||inspection.login||fit.disposition!=='match'||authorization.mode!=='search-rules'&&formDigest(inspection.form)!==packet.formDigest||actions.missing.length){results.push({jobId:packet.job.id,status:'posting_or_form_changed'});continue;}
    const attempt=resumed||{id:randomUUID(),jobId:packet.job.id,company:packet.job.company,title:packet.job.title,url:packet.job.url,tabId:packet.tabId,postingKey:key,day,status:'preparing',createdAt:at.toISOString(),reservedCostUsd:cost,resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,packetDigest:packet.digest};attempt.authorization=authorization;
+   if(restart){attempt.restartsAttemptId=restart.attemptId;attempt.restartAuthorizationId=restart.id;}
    if(resumed){attempt.status='preparing';attempt.reason=null;attempt.day=day;}else attempts.push(attempt);const save=async()=>{attempt.updatedAt=now().toISOString();await store.write('application-ledger.json',attempts);};await save();
+   if(restart){const grants=await store.read('application-restart-authorizations.json',[]),g=grants.find(g=>g.id===restart.id);g.usedByAttemptId=attempt.id;g.usedAt=now().toISOString();await store.write('application-restart-authorizations.json',grants);}
    try{
     let activeInspection=inspection,activeActions=actions.actions,check;
     for(let pass=0;pass<3;pass++){
@@ -255,7 +286,8 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
     if(!check.ok||check.captcha||check.manual){attempt.status='held';attempt.reason=check.reason||'Readback, CAPTCHA or manual action required';await save();results.push({...attempt});continue;}
     if(!await shouldContinue()){attempt.status='held';attempt.reason='Worker paused before submission';await save();results.push({...attempt});continue;}
     const current=await prerequisites(store,now());
-    if(current.resumeSha256!==packet.resumeSha256||current.profileSha256!==packet.profileSha256||current.searchSha256!==packet.searchSha256||!applicationAuthorization(current.policy,packet,adapter,await store.read('application-approvals.json',[]),now())||duplicate(packet.job,current.history,attempts.filter(a=>a.id!==attempt.id),current.reapplicationReviews))throw Error('Submission authorization or applicant state changed');
+    const currentAttempts=await store.read('application-ledger.json',[]),currentRestart=await restartException(store,packet.restartAuthorizationId,packet.job,current,currentAttempts,adapter,now(),attempt.id);
+    if(current.resumeSha256!==packet.resumeSha256||current.profileSha256!==packet.profileSha256||current.searchSha256!==packet.searchSha256||!applicationAuthorization(current.policy,packet,adapter,await store.read('application-approvals.json',[]),now())||packet.restartAuthorizationId&&!currentRestart||!currentRestart&&duplicate(packet.job,current.history,currentAttempts.filter(a=>a.id!==attempt.id),current.reapplicationReviews))throw Error('Submission authorization or applicant state changed');
     attempt.verificationCheckpoint=await adapter.captureVerificationCheckpoint?.(activeInspection);
     attempt.status='submission_unknown';await save(); // Durable BEFORE the only final click.
     await adapter.submit(activeInspection);
@@ -322,6 +354,9 @@ export async function reconcileApplications({home,adapter,now=()=>new Date()}) {
  return store.lock(async()=>{
   const ledger=await store.read('application-ledger.json',[]),results=[];
   for(const attempt of ledger.filter(a=>a.status==='submission_unknown'||a.status==='submitted'&&a.receipt?.confirmed)){
+   // A recovery page belongs to the new attempt. Its receipt must never be
+   // reused to promote the original lost attempt and double-count one receipt.
+   if(attempt.status==='submission_unknown'&&ledger.some(a=>a.restartsAttemptId===attempt.id)){results.push({jobId:attempt.jobId,status:'submission_unknown'});continue;}
    try{
     const job={id:attempt.jobId,title:attempt.title,company:attempt.company,url:attempt.url};
     const inspection=attempt.status==='submitted'||adapter.recoverReceipt?null:await adapter.inspect(job,{tabId:attempt.tabId});

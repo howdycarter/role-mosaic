@@ -169,13 +169,17 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
  }
  async captureVerificationCheckpoint(inspection){
   if(!['job-boards.greenhouse.io','boards.greenhouse.io'].includes(new URL(inspection.job.url).hostname))return null;
-  const fields=await inspection.tab.page.evaluate(()=>[...document.querySelectorAll('input,textarea,select,[aria-pressed],[role="radio"],[role="checkbox"]')].filter(e=>!['hidden','password'].includes(e.type)&&!/^security-input-[0-7]$/.test(e.id)&&e.autocomplete!=='one-time-code').map(e=>({id:e.id,name:e.name,type:e.type||e.getAttribute('role'),value:e.value,checked:['radio','checkbox'].includes(e.type)?e.checked:e.getAttribute('aria-checked'),pressed:e.getAttribute('aria-pressed'),files:e.type==='file'?[...e.files].map(f=>({name:f.name,size:f.size,lastModified:f.lastModified})):undefined,selected:e.closest('[class*="select__control"]')?.querySelector('[class*="single-value"],[class*="singleValue"]')?.textContent||''})));
-  return {fieldsSha256:digest(fields),resumeSha256:this.uploads[inspection.job.id]?.sha256||null};
+  // The provider rotates this hidden response after Submit. It is not an
+  // applicant answer. Visible fields, including similarly named ones, remain
+  // in the checkpoint; this never reads, alters or solves the provider widget.
+  const fields=await inspection.tab.page.evaluate(()=>[...document.querySelectorAll('input,textarea,select,[aria-pressed],[role="radio"],[role="checkbox"]')].filter(e=>!['hidden','password'].includes(e.type)&&!/^security-input-[0-7]$/.test(e.id)&&e.autocomplete!=='one-time-code'&&!(e.tagName==='TEXTAREA'&&e.name==='g-recaptcha-response'&&/^g-recaptcha-response(?:-\d+)?$/.test(e.id)&&!e.getClientRects().length)).map(e=>({id:e.id,name:e.name,type:e.type||e.getAttribute('role'),value:e.value,checked:['radio','checkbox'].includes(e.type)?e.checked:e.getAttribute('aria-checked'),pressed:e.getAttribute('aria-pressed'),files:e.type==='file'?[...e.files].map(f=>({name:f.name,size:f.size,lastModified:f.lastModified})):undefined,selected:e.closest('[class*="select__control"]')?.querySelector('[class*="single-value"],[class*="singleValue"]')?.textContent||''})));
+  return {schema:2,fieldsSha256:digest(fields),resumeSha256:this.uploads[inspection.job.id]?.sha256||null};
  }
  async continueEmailVerification(attempt,code,{beforeActivate}){
   const page=this.preservedPage(attempt,{exact:true});if(!page)throw Error('Original verification page unavailable');
   const tab=this.nativeTabs.byId.get(attempt.tabId),inspection={job:{id:attempt.jobId,title:attempt.title,url:attempt.url},tab,tabId:attempt.tabId};
   const original=attempt.verificationCheckpoint,current=await this.captureVerificationCheckpoint(inspection),upload=this.uploads[attempt.jobId];
+  if(original?.schema!==2)throw Error('Legacy checkpoint requires manual verification; it was not replaced');
   if(!current||current.fieldsSha256!==original.fieldsSha256||!upload||current.resumeSha256!==attempt.resumeSha256||upload.sha256!==attempt.resumeSha256||!(await page.locator('body').innerText()).includes(upload.filename))throw Error('Original application changed');
   for(let n=0;n<8;n++){const field=page.locator('#security-input-'+n);if(await field.count()!==1||!await field.isVisible()||await field.getAttribute('maxlength')!=='1')throw Error('Expected email challenge unavailable');}
   for(let n=0;n<8;n++)await page.locator('#security-input-'+n).fill(code[n]);
