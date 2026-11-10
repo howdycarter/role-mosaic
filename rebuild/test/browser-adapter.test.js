@@ -1,6 +1,7 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import {axIndex,postingLocation} from '../src/browser-adapter.js';
 import {optionForAnswer,sameAnswer} from '../src/application-values.js';
+test('location autocomplete accepts the verified city/state abbreviation but rejects another state or country',()=>{const field={label:'Location (City)',countryContext:'US',locationKnown:{city:'Exampletown',state:'Texas',stateCode:'TX',country:'United States'}};assert.equal(optionForAnswer(field,'Exampletown, Texas, United States',['Exampletown, TX, United States']),'Exampletown, TX, United States');assert.equal(optionForAnswer(field,'Exampletown, Texas, United States',['Exampletown, CA, United States','Exampletown, TX, Canada']),undefined);});
 test('negative prior-employment answer matches an explicit never-worked option, not a positive employment history',()=>{
  const field={label:'Are you now, or have you ever been employed by Example? *'};
  const options=['Yes, I have worked at Example in the past','Yes, I am currently employed by Example','No, I have never worked at Example'];

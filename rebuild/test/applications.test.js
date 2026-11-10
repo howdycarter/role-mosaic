@@ -2,8 +2,9 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';
 import path from 'node:path';import os from 'node:os';
-import {ApplicationStore,digest,prepareApplications,runApplications,postingKey,salaryForLocation,fillPlan,dayAt} from '../src/applications.js';
+import {ApplicationStore,digest,prepareApplications,runApplications,postingKey,salaryForLocation,fillPlan,dayAt,configureStandingAuthorization,answerFor} from '../src/applications.js';
 const now=()=>new Date('2026-11-09T18:00:00Z');
+test('compound authorization without sponsorship is affirmative for an authorized non-sponsored US applicant',()=>{const p={facts:{authorizedUS:true,requiresSponsorshipUS:false}};assert.equal(answerFor({label:'Are you legally authorized to work in the United States without requiring sponsorship now or in the future?'},p),'Yes');assert.equal(answerFor({label:'Will you require visa sponsorship?',countryContext:'US'},p),'No');assert.equal(answerFor({label:'Will you require visa sponsorship in Canada?',countryContext:'US'},p),undefined);assert.equal(answerFor({label:'If you require sponsorship now or in the future, please provide more detail.',countryContext:'US'},p),undefined);});
 async function fixture(){
  const root=await mkdtemp(path.join(os.tmpdir(),'mosaic-auto-')),store=new ApplicationStore(root),resume=path.join(root,'resume.pdf');
  const pdf=Buffer.from('%PDF-1.4\nsynthetic');await writeFile(resume,pdf);
@@ -43,6 +44,29 @@ test('plan is read-only; only explicit packet authorization enables fill and sub
   assert.equal((await f.store.read('jobs.json',[]))[0].receiptId,results[0].id);
   assert.equal((await f.run())[0].status,'duplicate_held');assert.deepEqual(f.events,['fill','submit']);
  }finally{await f.close();}
+});
+test('standing search authorization submits natively without inventing per-job approval and cannot authorize the Codex adapter',async()=>{
+ const f=await fixture();try{await f.prepare();await configureStandingAuthorization({home:f.root,evidence:'Applicant explicitly enabled automatic matching applications',now});
+ assert.equal((await f.run())[0].status,'authorization_required');f.adapter.transport='playwright';
+ const result=await f.run();assert.equal(result[0].status,'submitted');assert.equal(result[0].authorization.mode,'search-rules');assert.deepEqual(await f.store.read('application-approvals.json',[]),[]);
+ }finally{await f.close();}
+});
+test('standing scope changes and revocation during fill stop submission',async()=>{
+ for(const change of ['revoke','budget']){const f=await fixture();try{f.adapter.transport='playwright';await f.prepare();await configureStandingAuthorization({home:f.root,evidence:'Explicit synthetic applicant authorization',now});
+ const fill=f.adapter.fill;f.adapter.fill=async(...args)=>{await fill(...args);const p=await f.store.read('application-policy.json');if(change==='revoke')p.standingAuthorization.enabled=false;else p.dailyBudgetUsd=2;await f.store.write('application-policy.json',p)};
+ assert.equal((await f.run())[0].status,'held');assert.deepEqual(f.events,['fill']);
+ }finally{await f.close();}}
+});
+test('a native worker prepares and submits in the same cycle under standing rules',async()=>{
+ const f=await fixture();try{f.adapter.transport='playwright';await configureStandingAuthorization({home:f.root,evidence:'Explicit automatic search authorization',now});const {MosaicWorker}=await import('../src/worker.js');const w=new MosaicWorker({home:f.root,adapterFactory:async()=>f.adapter});await w.cycle({discover:false});assert.equal((await f.store.read('application-ledger.json'))[0].status,'submitted');assert.deepEqual(await f.store.read('application-approvals.json',[]),[]);assert.deepEqual(f.events,['fill','submit']);}finally{await f.close();}
+});
+test('posting-scoped answers do not leak to another employer or job',()=>{const form={fields:[{label:'Why this company?',type:'text',required:true,value:''}],resume:{label:'Resume'},submit:{label:'Submit'}};const p={facts:{},answers:[{question:'Why this company?',answer:'Company-specific narrative',verified:true,scopePostingKey:'job:A'}]};assert.equal(fillPlan(form,p,{postingKey:'job:A'}).actions[0].value,'Company-specific narrative');assert.equal(fillPlan(form,p,{postingKey:'job:B'}).actions.length,0);assert.equal(fillPlan(form,p,{postingKey:'job:B'}).missing.length,1);});
+test('pre-submit holds do not use standing submission quota; uncertain submissions still reserve it',async()=>{
+ const f=await fixture();try{f.adapter.transport='playwright';await f.prepare();await configureStandingAuthorization({home:f.root,evidence:'Explicit synthetic applicant authorization',now});
+ const day='2026-11-09',held=Array.from({length:15},(_,i)=>({id:'draft-'+i,postingKey:'other:'+i,day,status:'held',reservedCostUsd:0}));await f.store.write('application-ledger.json',held);await f.store.write('history.json',[{company:'Other',role:'Other',date:day,status:'not_submitted_listing_not_available'}]);
+ f.adapter.submit=async()=>{assert.equal((await f.store.read('application-ledger.json')).at(-1).status,'submission_unknown');f.events.push('submit')};const result=await f.run();assert.equal(result[0].status,'submitted');
+ }finally{await f.close();}
+ const f2=await fixture();try{f2.adapter.transport='playwright';await f2.prepare();await configureStandingAuthorization({home:f2.root,evidence:'Explicit synthetic applicant authorization',now});await f2.store.write('application-ledger.json',Array.from({length:15},(_,i)=>({id:'unknown-'+i,postingKey:'other:'+i,day:'2026-11-09',status:'submission_unknown'})));assert.equal((await f2.run())[0].status,'daily_limit');assert.deepEqual(f2.events,[]);}finally{await f2.close();}
 });
 test('a submit transport failure remains unknown and cannot be automatically retried',async()=>{
  const f=await fixture();try{await f.authorize();f.adapter.submit=async()=>{assert.equal((await f.store.read('application-ledger.json',[]))[0].status,'submission_unknown');throw Error('lost browser')};
@@ -108,7 +132,7 @@ test('receipt-only recovery records delayed employer confirmation without fillin
  }finally{await f.close();}
 });
 test('explicit held-draft continuation reuses its reservation and never resumes an unknown submission',async()=>{
- const f=await fixture();try{
+ const f=await fixture();f.adapter.transport='playwright';try{
   await f.authorize();f.adapter.verify=async()=>({ok:false,reason:'readback needs review'});
   const first=(await f.run())[0];assert.equal(first.status,'held');
   f.adapter.verify=async()=>({ok:true});
@@ -166,4 +190,30 @@ test('new applicants must explicitly approve their exact PDF and supply reviewed
   assert.equal((await store.read('application-policy.json')).dailyBudgetUsd,0);
   await assert.rejects(configureApplications({home:root,profileFile:facts,confirm:'reviewed'}),/already exists/);
  }finally{await rm(root,{recursive:true,force:true});}
+});
+
+test('native held draft refresh after restart retains its attempt and rechecks current rules, while unknowns never reopen',async()=>{
+ const f=await fixture();try{
+  f.adapter.transport='playwright';await configureStandingAuthorization({home:f.root,evidence:'Explicit applicant authorization',now});
+  await f.prepare();f.adapter.verify=async()=>({ok:false,reason:'Synthetic unsupported optional control'});
+  const [held]=await f.run();assert.equal(held.status,'held');
+  const expired=await f.store.read('application-plan.json');expired.packets[0].expiresAt='2020-01-01T00:00:00Z';await f.store.write('application-plan.json',expired);
+  f.adapter.verify=async()=>({ok:true});const inspect=f.adapter.inspect;let inspected=0;f.adapter.inspect=async(...args)=>{inspected++;return {...await inspect(...args),tabId:'replacement-tab'}};
+  const [submitted]=await runApplications({home:f.root,adapter:f.adapter,now,resumeAttemptId:held.id});
+  assert.equal(submitted.id,held.id);assert.equal(submitted.status,'submitted');assert.equal(submitted.draftRefreshes.length,1);assert.equal(submitted.tabId,'replacement-tab');assert.equal((await f.store.read('application-ledger.json')).length,1);
+  const ledger=await f.store.read('application-ledger.json');ledger[0].status='submission_unknown';await f.store.write('application-ledger.json',ledger);const count=inspected;
+  assert.deepEqual(await runApplications({home:f.root,adapter:f.adapter,now,resumeAttemptId:held.id}),[]);assert.equal(inspected,count);
+ }finally{await f.close();}
+});
+test('native held draft refresh refuses revoked standing authorization before any browser action',async()=>{
+ const f=await fixture();try{f.adapter.transport='playwright';await configureStandingAuthorization({home:f.root,evidence:'Explicit applicant authorization',now});await f.prepare();f.adapter.verify=async()=>({ok:false});const [held]=await f.run();await configureStandingAuthorization({home:f.root,enabled:false,now});f.adapter.inspect=()=>{throw Error('must not inspect')};assert.equal((await runApplications({home:f.root,adapter:f.adapter,now,resumeAttemptId:held.id}))[0].status,'authorization_required');}finally{await f.close();}
+});
+
+test('legal and preferred name aliases use existing facts, while combined authorization does not erase sponsorship conditions',()=>{
+ const p={facts:{firstName:'Example',lastName:'Person',preferredName:'Sample',city:'Austin',state:'Texas',stateCode:'TX',country:'United States',authorizedUS:true,requiresSponsorshipUS:false}};
+ assert.equal(answerFor({label:'Legal First Name'},p),'Example');assert.equal(answerFor({label:'Legal Last Name'},p),'Person');assert.equal(answerFor({label:'Preferred First & Last Name'},p),'Sample Person');
+ const options=['Yes, and I will not require sponsorship now or in the future','Yes, but I will require sponsorship now or in the future to maintain work authorization','No, I am not currently authorized to work in this location'];
+ assert.equal(answerFor({label:'Are you legally authorized to work in this location?',countryContext:'US',options},p),options[0]);
+ assert.equal(answerFor({label:'Are you legally authorized to work in this location?',countryContext:'Canada',options},p),undefined);
+ const field={label:'What location do you intend to work from?',type:'select',required:true};const plan=fillPlan({fields:[field]},p);assert.equal(plan.actions[0].value,'Austin, Texas, United States');assert.equal(field.locationKnown.stateCode,'TX');
 });

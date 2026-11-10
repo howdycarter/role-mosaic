@@ -1,6 +1,6 @@
 import {open,unlink,mkdir} from 'node:fs/promises';
 import path from 'node:path';
-import {ApplicationStore,prepareApplications,runApplications,reconcileApplications,postingKey,authorizationMatches,supportedPosting} from './applications.js';
+import {ApplicationStore,prepareApplications,runApplications,reconcileApplications,postingKey,authorizationMatches,standingAuthorizationMatches,supportedPosting} from './applications.js';
 import {evaluate,mergeJobs,historyMatch} from './core.js';
 import {fetchBoard} from './sources.js';
 
@@ -48,8 +48,8 @@ export class MosaicWorker {
    this.status.reconciled=await reconcileApplications({home:this.home,adapter});
    let plan=await this.store.read('application-plan.json',{packets:[],held:[]});
    let ledger=await this.store.read('application-ledger.json',[]);
-   const now=new Date(),approvals=await this.store.read('application-approvals.json',[]);
-   const authorized=plan.packets.filter(p=>Date.parse(p.expiresAt)>now.getTime()&&!ledger.some(a=>a.packetDigest===p.digest)&&approvals.some(a=>authorizationMatches(a,p,now)));
+   const now=new Date(),approvals=await this.store.read('application-approvals.json',[]),policy=await this.store.read('application-policy.json',{});
+   const authorized=plan.packets.filter(p=>Date.parse(p.expiresAt)>now.getTime()&&!ledger.some(a=>a.packetDigest===p.digest)&&(standingAuthorizationMatches(policy,p,adapter)||approvals.some(a=>authorizationMatches(a,p,now))));
    if(submit&&config.autoSubmitApproved&&authorized.length&&!this.paused){
     this.status.stage='approved applications';await this.persist();
     // One packet at a time permits Pause between applications. Engine writes
@@ -76,8 +76,11 @@ export class MosaicWorker {
     if(candidates.length){
      plan=await prepareApplications({home:this.home,adapter,jobIds:candidates.map(j=>j.id)});
      for(const j of candidates)seen[j.id]=new Date().toISOString();await this.store.write('worker-inspected.json',seen);
+     const journal=await this.store.read('application-preflight-history.json',[]);journal.push({at:new Date().toISOString(),held:plan.held,prepared:plan.packets.map(p=>({id:p.id,company:p.job.company,title:p.job.title}))});await this.store.write('application-preflight-history.json',journal);
+     if(submit&&config.autoSubmitApproved&&!this.paused){for(const packet of plan.packets){if(this.paused)break;if(standingAuthorizationMatches(await this.store.read('application-policy.json',{}),packet,adapter))await runApplications({home:this.home,adapter,packetIds:[packet.id],shouldContinue:()=>!this.paused});}}
     }
    }
+   ledger=await this.store.read('application-ledger.json',[]);this.status.authorizationMode=policy.authorizationMode||'per-posting-packet';
    this.status.plan={prepared:plan.packets.filter(p=>!ledger.some(a=>a.packetDigest===p.digest)&&Date.parse(p.expiresAt)>Date.now()).length,held:plan.held};
    this.status.lastRun=new Date().toISOString();this.status.state=this.paused?'paused':'idle';this.status.stage='finished';return this.status;
   }catch(e){this.status.state='error';this.status.error=String(e.message).slice(0,300);throw e;}
@@ -86,7 +89,7 @@ export class MosaicWorker {
  async resume(attemptId){
   if(this.running)throw Error('Worker already running');
   const lock=path.join(this.home,'worker-run.lock');let handle;try{handle=await open(lock,'wx',0o600);}catch(e){if(e.code==='EEXIST')throw Error('Another worker owns this workspace');throw e;}
-  this.running=true;this.status.state='running';this.status.stage='continuing reviewed draft';this.status.error=null;await this.persist();
+  this.running=true;this.paused=false;this.status.state='running';this.status.stage='continuing reviewed draft';this.status.error=null;await this.persist();
   try{await handle.writeFile(JSON.stringify({pid:process.pid,startedAt:new Date().toISOString()}));await handle.close();const adapter=await this.browser();const result=await runApplications({home:this.home,adapter,resumeAttemptId:attemptId});this.status.lastRun=new Date().toISOString();this.status.state=this.paused?'paused':'idle';this.status.stage='finished';return result;}catch(e){this.status.state='error';this.status.error=String(e.message).slice(0,300);throw e;}finally{this.running=false;await this.persist();await unlink(lock);}
  }
  async review(attemptId){

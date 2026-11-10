@@ -2,7 +2,7 @@
 
 A local-first job-search workspace. Bring your own résumé, career history, search rules, employer boards, and application records. Applicant data stays in your private local workspace and is not included in this repository.
 
-**Start with the independent rebuild in [`rebuild/`](rebuild/README.md).** Mosaic owns a local Playwright browser, job-search worker, dashboard and optional direct Notion connection. It can discover jobs, check your rules/history, prepare applications and independently submit specifically approved packets without an active Codex chat. CAPTCHA, accounts, unsupported forms and missing facts remain holds. A tracking status is not an employer receipt. Requires Node.js 22+ and no JEV/OpenRouter or AI subscription. All builds, tests and services run locally; no GitHub Actions or Vercel deployment. See [standalone setup](docs/STANDALONE.md).
+**Start with the independent rebuild in [`rebuild/`](rebuild/README.md).** Mosaic owns a local Playwright browser, job-search worker, dashboard and optional direct Notion connection. It can discover jobs, check your rules/history, prepare applications and independently submit applications under explicitly enabled standing search rules or per-job review without an active Codex chat. CAPTCHA, accounts, unsupported forms and missing facts remain holds. A tracking status is not an employer receipt. Requires Node.js 22+ and no JEV/OpenRouter or AI subscription. All builds, tests and services run locally; no GitHub Actions or Vercel deployment. See [standalone setup](docs/STANDALONE.md).
 
 ## Quick start for a new applicant
 
@@ -534,3 +534,7 @@ Bug reports, fixes for a form that filled wrongly, new job sources and site note
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Standing authorization for the native worker
+
+Mosaic’s own Playwright worker can use an applicant’s explicit standing authorization instead of per-job approval. Enable **Automatic applications** in the dashboard after checking the displayed search rules and approved résumé. The grant is bound to exact résumé/profile/search hashes, daily submission limit, budget and timezone, and is recorded on each attempt. Changes or revocation stop it; enabling the timer alone does not create a grant. The Codex Browser adapter still follows its own action-time confirmation rules. Pre-submit holds do not consume a standing-mode final-submission slot; confirmed and uncertain submissions do. Provider costs remain reserved for all attempts. Missing answers, unsupported controls, ambiguous eligibility and human verification still hold the affected role while other eligible roles continue. Employer-published structured annual salary evidence is used when available; bonus, equity, OTE and foreign-currency figures cannot satisfy the USD base-salary floor.

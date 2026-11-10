@@ -37,40 +37,61 @@ export function salaryForLocation(text,state) {
  const generic=ranges.filter(r=>!r.region);
  return ranges.length===1&&generic.length===1?generic[0]:null;
 }
+function inspectionSalary(inspection,state){
+ const text=salaryForLocation(inspection.description,state);if(text)return text;
+ const pay=inspection.compensation,e=inspection.publicEvidence;
+ if(e&&samePosting(e.posting,inspection.job.url)&&/^https:\/\/(?:api\.ashbyhq\.com|boards-api\.greenhouse\.io)\//.test(e.sourceUrl||'')&&pay?.currency==='USD'&&pay.interval==='year'&&Number.isFinite(pay.min)&&Number.isFinite(pay.max)&&pay.max>=pay.min)return pay;
+ return null;
+}
 export function formDigest(form) {
  return digest({fields:form.fields.map(({label,type,required})=>({label,type,required})),resume:form.resume?.label,submit:form.submit?.label});
 }
 export function answerFor(field,profile) {
  const label=field.label.replace(/[*:]/g,'').replace(/\s+/g,' ').trim(),key=label.toLowerCase(),f=profile.facts;
- const exact=(profile.answers||[]).find(a=>a.question===label&&a.verified===true);
+ const eligible=(profile.answers||[]).filter(a=>a.question===label&&a.verified===true&&(!a.scopePostingKey||a.scopePostingKey===profile.scopePostingKey));
+ const exact=eligible.find(a=>a.scopePostingKey)||eligible[0];
  if(exact)return exact.answer;
- if(/^(first name|given name)$/.test(key))return f.firstName;
- if(/^(last name|surname|family name)$/.test(key))return f.lastName;
+ if(/^(first name|given name|legal first name)$/.test(key))return f.firstName;
+ if(/^(last name|surname|family name|legal last name)$/.test(key))return f.lastName;
  if(/^(name|full name|legal name)$/.test(key))return f.fullName;
+ if(['full name (preferred)','preferred first & last name'].includes(key)&&f.preferredName&&f.lastName)return f.preferredName+' '+f.lastName;
  if(/^e-?mail(?: address)?$/.test(key))return f.email;
  if(/^(phone|phone number|telephone)$/.test(key))return f.phone;
  if(/^preferred name$/.test(key))return f.preferredName;
  if(/^country(?: code)?$/.test(key))return f.country;
- if(/^(city|current city|location \(city\))$/.test(key))return f.city;
+ if(key==='location'&&!field.required)return undefined;
+ if(key==='what location do you intend to work from?'&&f.city&&f.state&&f.country)return [f.city,f.state,f.country].join(', ');
+ if(/^(city|current city|location \(city\)|current location|location)$/.test(key))return field.type==='select'&&f.city&&f.state&&f.country?[f.city,f.state,f.country].join(', '):f.city;
  if(/^(state|state\/province|which u\.s\. state or canadian province do you reside in\?)$/.test(key))return f.state;
  if(/^postal code|^zip code$/.test(key))return f.postalCode;
  if(/^linkedin(?: profile| url)?$/.test(key))return f.linkedin;
  if(/^github(?: profile| url)?$/.test(key))return f.github;
  if(/^(website|portfolio|portfolio url|personal website)$/.test(key))return f.website;
- if(/^current company$/.test(key))return f.currentCompany;
- if(/sponsor/.test(key)&&/united states|u\.s\.|\bus\b/.test(key)&&typeof f.requiresSponsorshipUS==='boolean')return f.requiresSponsorshipUS?'Yes':'No';
- if(/(?:authorized|eligible|right) to work/.test(key)&&/united states|u\.s\.|\bus\b/.test(key)&&typeof f.authorizedUS==='boolean')return f.authorizedUS?'Yes':'No';
+ if(/^current company$/.test(key)||key==='please provide the name of your current (or most recent) company')return f.currentCompany;
+ if(/^do you live in the listed location for this position\??$/.test(key)&&field.countryContext==='US'&&f.country==='United States')return 'Yes';
+ const usQuestion=/united states|u\.s\.|\bus\b/.test(key)||field.countryContext==='US'&&!/canada|australia|united kingdom|germany|europe|india/.test(key);
+ if(/(?:authorized|eligible|right) to work/.test(key)&&/without.*sponsor/.test(key)&&usQuestion&&typeof f.authorizedUS==='boolean'&&typeof f.requiresSponsorshipUS==='boolean')return f.authorizedUS&&!f.requiresSponsorshipUS?'Yes':'No';
+ if(/sponsor/.test(key)&&!/^if you require/.test(key)&&usQuestion&&typeof f.requiresSponsorshipUS==='boolean')return f.requiresSponsorshipUS?'Yes':'No';
+ if(/(?:authorized|eligible|right) to work/.test(key)&&usQuestion&&typeof f.authorizedUS==='boolean'){
+  const combined='Yes, and I will not require sponsorship now or in the future';
+  if(f.authorizedUS&&f.requiresSponsorshipUS===false&&field.options?.includes(combined))return combined;
+  return f.authorizedUS?'Yes':'No';
+ }
  return undefined;
 }
-export function fillPlan(form,profile) {
+export function fillPlan(form,profile,{postingKey:scope}={}) {
+ if(scope)profile={...profile,scopePostingKey:scope};
  const actions=[],missing=[];
  for(const field of form.fields){
   if(field.type==='file')continue;
+  if(field.type==='select'&&/^(?:location(?: \(city\))?|current location|what location do you intend to work from\?)\*?$/i.test(field.label.trim()))field.locationKnown={city:profile.facts.city,state:profile.facts.state,stateCode:profile.facts.stateCode,country:profile.facts.country};
   const value=answerFor(field,profile);
   if(value===undefined||value===null||value===''){if(field.required)missing.push(field.label);continue;}
-  if(['password','hidden'].includes(field.type)||/password|signature|agree|consent|certif(?:y|ication)/i.test(field.label)){missing.push(`Manual action: ${field.label}`);continue;}
-  if(field.value&&!sameAnswer(field,field.value,value)){missing.push(`Existing value differs: ${field.label}`);continue;}
-  actions.push({field,value:String(value)});
+  const consent=(profile.answers||[]).find(a=>a.question===field.label.replace(/[*:]/g,'').replace(/\s+/g,' ').trim()&&a.verified&&['privacy-consent','application-attestation'].includes(a.kind)&&(!a.scopePostingKey||a.scopePostingKey===profile.scopePostingKey));
+  const personalAgreement=/\b(?:I|you)\s+(?:(?:do|will|must|hereby)\s+)?agree\b|\b(?:do|will|would)\s+you\s+agree\b/i.test(field.label);
+  if(['password','hidden'].includes(field.type)||(/password|signature|typing my name|type your name|consent|certif(?:y|ication)/i.test(field.label)||personalAgreement)&&!consent){missing.push(`Manual action: ${field.label}`);continue;}
+  if(field.type!=='checkbox'&&field.value&&!sameAnswer(field,field.value,value)){missing.push(`Existing value differs: ${field.label}`);continue;}
+  actions.push({field:consent?{...field,consentVerified:true}:field,value:String(value)});
  }
  if(!form.resume)missing.push('Supported resume upload');
  if(!form.submit)missing.push('Unambiguous final Submit application button');
@@ -102,7 +123,7 @@ function duplicate(job,history,attempts) {
 function historyUsed(history,day,timezone,attempts){
  const ids=new Set(attempts.map(a=>a.id));
  return history.filter(r=>{
-  if(ids.has(r.receiptId)||!/applied|submitted|confirmed_received|submission_unknown/i.test(r.status||r.outcome||''))return false;
+  if(ids.has(r.receiptId)||!['applied','submitted','submitted_confirmed','confirmed_received','submission_unknown'].includes(String(r.status||r.outcome||'').toLowerCase()))return false;
   const date=r.submittedAt||r.appliedAt||r.date||r.at;if(!date)return false;
   if(/^\d{4}-\d{2}-\d{2}$/.test(date))return date===day;
   const parsed=new Date(date);return Number.isFinite(parsed.getTime())&&dayAt(parsed,timezone)===day;
@@ -110,6 +131,29 @@ function historyUsed(history,day,timezone,attempts){
 }
 export function authorizationMatches(approval,packet,now) {
  return approval?.approved===true&&approval.packetDigest===packet.digest&&approval.resumeSha256===packet.resumeSha256&&approval.profileSha256===packet.profileSha256&&approval.searchSha256===packet.searchSha256&&Date.parse(approval.expiresAt)>now.getTime();
+}
+export function standingAuthorizationMatches(policy,packet,adapter){
+ const grant=policy?.standingAuthorization;
+ return adapter?.transport==='playwright'&&policy.authorizationMode==='search-rules'&&grant?.enabled===true&&grant.id&&grant.evidence&&grant.resumeSha256===packet.resumeSha256&&grant.profileSha256===packet.profileSha256&&grant.searchSha256===packet.searchSha256&&grant.maxPerDay===policy.maxPerDay&&grant.dailyBudgetUsd===policy.dailyBudgetUsd&&grant.timezone===policy.timezone;
+}
+function applicationAuthorization(policy,packet,adapter,approvals,at){
+ if(standingAuthorizationMatches(policy,packet,adapter))return {mode:'search-rules',grantId:policy.standingAuthorization.id,scopeDigest:digest(policy.standingAuthorization)};
+ return approvals.some(a=>authorizationMatches(a,packet,at))?{mode:'per-posting-packet',packetDigest:packet.digest}:null;
+}
+export async function configureStandingAuthorization({home,evidence,enabled=true,now=()=>new Date()}){
+ const store=new ApplicationStore(home),policy=await store.read('application-policy.json',{});
+ if(!enabled){policy.authorizationMode='per-posting-packet';if(policy.standingAuthorization)policy.standingAuthorization.enabled=false;await store.write('application-policy.json',policy);return {enabled:false};}
+ if(typeof evidence!=='string'||!evidence.trim())throw Error('Record the applicant\'s explicit authorization of automatic matching applications');
+ const ctx=await prerequisites(store,now());
+ const grant={id:randomUUID(),enabled:true,grantedAt:now().toISOString(),evidence:evidence.trim(),resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,searchSha256:ctx.searchSha256,maxPerDay:policy.maxPerDay,dailyBudgetUsd:policy.dailyBudgetUsd,timezone:policy.timezone};
+ await store.write('application-policy.json',{...policy,authorizationMode:'search-rules',standingAuthorization:grant});return {enabled:true,grantId:grant.id};
+}
+function packetFromInspection(job,inspection,ctx,at) {
+ const plan=fillPlan(inspection.form,ctx.profile,{postingKey:postingKey(job.url)}),salary=inspectionSalary(inspection,ctx.profile.facts.stateCode);
+ const fit=evaluate({...job,location:inspection.location,compensation:salary},ctx.search);
+ if(!inspection.titleVerified||inspection.closed||inspection.login||fit.disposition!=='match'||plan.missing.length)throw Error('Fresh draft requires review: '+[...fit.reasons,...plan.missing].join('; '));
+ const packet={id:randomUUID(),job,tabId:inspection.tabId,createdAt:at.toISOString(),expiresAt:new Date(at.getTime()+60*60*1000).toISOString(),resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,searchSha256:ctx.searchSha256,formDigest:formDigest(inspection.form),salary,location:inspection.location,fields:plan.actions.map(a=>a.field.label),answersPreview:plan.actions.map(a=>({question:a.field.label,answer:a.value})),resumeFilename:path.basename(ctx.connections.resume)};
+ packet.digest=digest(packet);return packet;
 }
 /** Inspect only: no contact fields, uploads or final buttons are touched. */
 export async function prepareApplications({home,adapter,limit=15,jobIds,now=()=>new Date()}) {
@@ -124,10 +168,10 @@ export async function prepareApplications({home,adapter,limit=15,jobIds,now=()=>
   if(!/director|vice president|\bvp\b|head|chief/i.test(job.title)&&ctx.policy.requireICReview!==false){held.push({id:job.id,company:job.company,title:job.title,reason:'Individual-contributor specialization requires review'});continue;}
   let inspection;try{inspection=await adapter.inspect(job);}catch{held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Posting or form could not be inspected'});continue;}
   if(!inspection.titleVerified||inspection.closed||inspection.login){held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Closed, sign-in required, or title mismatch'});continue;}
-  const pay=salaryForLocation(inspection.description,ctx.profile.facts.stateCode);
+  const pay=inspectionSalary(inspection,ctx.profile.facts.stateCode);
   const fit=evaluate({...job,location:inspection.location,compensation:pay},ctx.search);
   if(fit.disposition!=='match'){held.push({id:job.id,company:job.company,title:job.title,reason:fit.reasons.join('; ')});continue;}
-  const plan=fillPlan(inspection.form,ctx.profile);
+  const plan=fillPlan(inspection.form,ctx.profile,{postingKey:postingKey(job.url)});
   if(plan.missing.length){held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Missing verified answers or supported controls',questions:plan.missing});continue;}
   const packet={id:randomUUID(),job,tabId:inspection.tabId,createdAt:now().toISOString(),expiresAt:new Date(now().getTime()+60*60*1000).toISOString(),resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,searchSha256:ctx.searchSha256,formDigest:formDigest(inspection.form),salary:pay,location:inspection.location,fields:plan.actions.map(a=>a.field.label),answersPreview:plan.actions.map(a=>({question:a.field.label,answer:a.value})),resumeFilename:path.basename(ctx.connections.resume)};
   packet.digest=digest(packet);packets.push(packet);
@@ -140,6 +184,22 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
  return store.lock(async()=>{
   const plan=await store.read('application-plan.json',null),approvals=await store.read('application-approvals.json',[]);
   if(!plan)throw Error('Prepare an application plan before running');
+  // Only a pre-submit hold can be refreshed after a browser/service restart.
+  // An uncertain or confirmed final submission is never opened as a new form.
+  if(resumeAttemptId&&adapter.transport==='playwright'&&(await store.read('application-policy.json',{})).authorizationMode==='search-rules'){
+   const ledger=await store.read('application-ledger.json',[]),held=ledger.find(a=>a.id===resumeAttemptId&&a.status==='held');
+   if(!held)return [];
+   const ctx=await prerequisites(store,now()),job=(await store.read('jobs.json',[])).find(j=>j.id===held.jobId);
+   const scope={resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,searchSha256:ctx.searchSha256};
+   if(!standingAuthorizationMatches(ctx.policy,scope,adapter))throw Error('Fresh held draft requires current native standing authorization');
+   if(!job||['applied','dismissed','rejected'].includes(job.status)||duplicate(job,ctx.history,ledger.filter(a=>a.id!==held.id)))throw Error('Held draft is no longer eligible');
+   const inspection=await adapter.inspect(job),fresh=packetFromInspection(job,inspection,ctx,now());
+   (held.draftRefreshes||=[]).push({at:now().toISOString(),previousPacketDigest:held.packetDigest,previousTabId:held.tabId,packetDigest:fresh.digest,grantId:ctx.policy.standingAuthorization.id});
+   if(held.tabId!==fresh.tabId)held.browserEvidence=null;
+   held.packetDigest=fresh.digest;held.tabId=fresh.tabId;
+   plan.packets=plan.packets.filter(p=>p.digest!==held.draftRefreshes.at(-1).previousPacketDigest);plan.packets.push(fresh);
+   await store.write('application-plan.json',plan);await store.write('application-ledger.json',ledger);packetIds=[fresh.id];
+  }
   const results=[];
   for(const packet of plan.packets.filter(p=>!packetIds||packetIds.includes(p.id)).slice(0,limit)){
    const at=now(),ctx=await prerequisites(store,at),attempts=await store.read('application-ledger.json',[]),key=postingKey(packet.job.url);
@@ -148,26 +208,37 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
    if(resumeAttemptId&&!resumed)continue;
    if(duplicate(packet.job,ctx.history,attempts.filter(a=>a.id!==resumed?.id))){results.push({jobId:packet.job.id,status:'duplicate_held'});continue;}
    const day=dayAt(at,ctx.policy.timezone),today=attempts.filter(a=>a.day===day),imported=historyUsed(ctx.history,day,ctx.policy.timezone,attempts);
-   if(today.length+imported-(resumed?.day===day?1:0)>=ctx.policy.maxPerDay){results.push({status:'daily_limit'});break;}
+   const quota=ctx.policy.authorizationMode==='search-rules'?today.filter(a=>['submitted','submission_unknown'].includes(a.status)).length:today.length-(resumed?.day===day?1:0);
+   if(quota+imported>=ctx.policy.maxPerDay){results.push({status:'daily_limit'});break;}
    const cost=adapter.estimatedCostUsd;
    if(!Number.isFinite(cost)||cost<0||today.reduce((n,a)=>n+(a.reservedCostUsd||0),0)+cost>ctx.policy.dailyBudgetUsd){results.push({status:'budget_limit'});break;}
-   if(!approvals.some(a=>authorizationMatches(a,packet,at))){results.push({jobId:packet.job.id,status:'authorization_required'});continue;}
+   const authorization=applicationAuthorization(ctx.policy,packet,adapter,approvals,at);
+   if(!authorization){results.push({jobId:packet.job.id,status:'authorization_required'});continue;}
    if(resumed?.browserEvidence)adapter.restoreEvidence?.(packet.job.id,resumed.browserEvidence);
    const inspection=await adapter.inspect(packet.job,{tabId:packet.tabId});
-   const fit=evaluate({...packet.job,location:inspection.location,compensation:salaryForLocation(inspection.description,ctx.profile.facts.stateCode)},ctx.search),actions=fillPlan(inspection.form,ctx.profile);
-   if(!inspection.titleVerified||inspection.closed||inspection.login||fit.disposition!=='match'||formDigest(inspection.form)!==packet.formDigest||actions.missing.length){results.push({jobId:packet.job.id,status:'posting_or_form_changed'});continue;}
-   const attempt=resumed||{id:randomUUID(),jobId:packet.job.id,company:packet.job.company,title:packet.job.title,url:packet.job.url,tabId:packet.tabId,postingKey:key,day,status:'preparing',createdAt:at.toISOString(),reservedCostUsd:cost,resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,packetDigest:packet.digest};
+   const fit=evaluate({...packet.job,location:inspection.location,compensation:inspectionSalary(inspection,ctx.profile.facts.stateCode)},ctx.search),actions=fillPlan(inspection.form,ctx.profile,{postingKey:key});
+   if(!inspection.titleVerified||inspection.closed||inspection.login||fit.disposition!=='match'||authorization.mode!=='search-rules'&&formDigest(inspection.form)!==packet.formDigest||actions.missing.length){results.push({jobId:packet.job.id,status:'posting_or_form_changed'});continue;}
+   const attempt=resumed||{id:randomUUID(),jobId:packet.job.id,company:packet.job.company,title:packet.job.title,url:packet.job.url,tabId:packet.tabId,postingKey:key,day,status:'preparing',createdAt:at.toISOString(),reservedCostUsd:cost,resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,packetDigest:packet.digest};attempt.authorization=authorization;
    if(resumed){attempt.status='preparing';attempt.reason=null;attempt.day=day;}else attempts.push(attempt);const save=async()=>{attempt.updatedAt=now().toISOString();await store.write('application-ledger.json',attempts);};await save();
    try{
-    attempt.browserEvidence=await adapter.fill(inspection,actions.actions,ctx.connections.resume);await save();
-    const check=await adapter.verify(inspection,actions.actions,ctx.connections.resume);
+    let activeInspection=inspection,activeActions=actions.actions,check;
+    for(let pass=0;pass<3;pass++){
+     if(pass>0){const live=await prerequisites(store,now());if(!await shouldContinue()||!applicationAuthorization(live.policy,packet,adapter,await store.read('application-approvals.json',[]),now()))throw Error('Application authorization changed during conditional form handling');}
+     attempt.browserEvidence=await adapter.fill(activeInspection,activeActions,ctx.connections.resume);await save();
+     check=await adapter.verify(activeInspection,activeActions,ctx.connections.resume);
+     if(check.ok||authorization.mode!=='search-rules'||check.reason!=='Posting or form structure changed'||pass===2)break;
+     const fresh=await adapter.inspect(packet.job,{tabId:packet.tabId}),freshPlan=fillPlan(fresh.form,ctx.profile,{postingKey:key});
+     const freshFit=evaluate({...packet.job,location:fresh.location,compensation:inspectionSalary(fresh,ctx.profile.facts.stateCode)},ctx.search);
+     if(!fresh.titleVerified||fresh.closed||fresh.login||freshFit.disposition!=='match'||freshPlan.missing.length){check={ok:false,reason:'Conditional form requires review: '+freshPlan.missing.join('; ')};break;}
+     (attempt.formRevisions||=[]).push({from:formDigest(activeInspection.form),to:formDigest(fresh.form),fields:freshPlan.actions.map(a=>a.field.label),at:now().toISOString(),authorizationGrantId:authorization.grantId});await save();activeInspection=fresh;activeActions=freshPlan.actions;
+    }
     if(!check.ok||check.captcha||check.manual){attempt.status='held';attempt.reason=check.reason||'Readback, CAPTCHA or manual action required';await save();results.push({...attempt});continue;}
     if(!await shouldContinue()){attempt.status='held';attempt.reason='Worker paused before submission';await save();results.push({...attempt});continue;}
     const current=await prerequisites(store,now());
-    if(current.resumeSha256!==packet.resumeSha256||current.profileSha256!==packet.profileSha256||current.searchSha256!==packet.searchSha256||!(await store.read('application-approvals.json',[])).some(a=>authorizationMatches(a,packet,now()))||duplicate(packet.job,current.history,attempts.filter(a=>a.id!==attempt.id)))throw Error('Submission authorization or applicant state changed');
+    if(current.resumeSha256!==packet.resumeSha256||current.profileSha256!==packet.profileSha256||current.searchSha256!==packet.searchSha256||!applicationAuthorization(current.policy,packet,adapter,await store.read('application-approvals.json',[]),now())||duplicate(packet.job,current.history,attempts.filter(a=>a.id!==attempt.id)))throw Error('Submission authorization or applicant state changed');
     attempt.status='submission_unknown';await save(); // Durable BEFORE the only final click.
-    await adapter.submit(inspection);
-    const receipt=await adapter.confirm(inspection);
+    await adapter.submit(activeInspection);
+    const receipt=await adapter.confirm(activeInspection);
     if(receipt?.confirmed===true&&receipt.text&&samePosting(receipt.posting,packet.job.url)){
      attempt.status='submitted';attempt.reason=null;attempt.receipt={...receipt,verifiedAt:now().toISOString(),resumeSha256:ctx.resumeSha256};await save();
      const history=await store.read('history.json',[]);history.push({company:packet.job.company,role:packet.job.title,posting:packet.job.url,status:'submitted',submittedAt:now().toISOString(),receiptId:attempt.id});await store.write('history.json',history);

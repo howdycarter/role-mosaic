@@ -4,6 +4,7 @@ import {randomUUID} from 'node:crypto';
 import {CodexBrowserAdapter} from './browser-adapter.js';
 import {digest,postingKey,supportedPosting} from './applications.js';
 import {optionForAnswer,sameAnswer} from './application-values.js';
+import {livePostingEvidence} from './sources.js';
 
 // A native transport: no Codex connection, browser extension, CDP attachment,
 // user-profile copying, stealth switches, remote debugging port or AI API.
@@ -20,10 +21,11 @@ class NativeTabs {
 }
 
 export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
- constructor(context,{home}={}){const tabs=new NativeTabs(context);super({tabs},{home});this.context=context;this.nativeTabs=tabs;this.transport='playwright';}
+ constructor(context,{home,evidenceLoader=livePostingEvidence}={}){const tabs=new NativeTabs(context);super({tabs},{home});this.context=context;this.nativeTabs=tabs;this.transport='playwright';this.evidenceLoader=evidenceLoader;}
  static async launch({home,headless=false,channel='chrome',context}={}){
   if(!context){
-   const directory=path.join(home,'browser-profile');await mkdir(directory,{recursive:true,mode:0o700});await chmod(directory,0o700);
+   const slot=process.env.ROLEMOSAIC_BROWSER_SLOT||'';if(slot&&!/^[a-z0-9-]{1,40}$/.test(slot))throw Error('Invalid private browser slot');
+   const directory=path.join(home,'browser-profile'+(slot?'-'+slot:''));await mkdir(directory,{recursive:true,mode:0o700});await chmod(directory,0o700);
    const {chromium}=await import('playwright');
    context=await chromium.launchPersistentContext(directory,{channel:channel==='chromium'?undefined:channel,headless,chromiumSandbox:true,acceptDownloads:false,viewport:{width:1280,height:900},args:['--restore-last-session']});
    context.setDefaultTimeout(10000);context.setDefaultNavigationTimeout(30000);
@@ -39,10 +41,10 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   const tab=existing||await this.nativeTabs.new();
   if(!existing)await tab.goto(job.url);
   await tab.page.locator('h1').first().waitFor({state:'visible'});
-  let overview=await tab.page.locator('body').innerText();
+  const applicationText=await tab.page.locator('body').innerText();let overview=applicationText;
   if(new URL(job.url).hostname==='jobs.ashbyhq.com'){
    const application=tab.page.getByRole('tab',{name:'Application',exact:true});
-   if(await application.count()===1&&await application.getAttribute('aria-selected')!=='true')await application.click();
+   if(await application.count()===1){if(await application.getAttribute('aria-selected')!=='true')await application.click();await tab.page.locator('input[type="email"],input[type="file"]').first().waitFor({state:'attached',timeout:10000});}
    // Ashby removes overview copy on the Application tab. Retrieve it read-only
    // on a second page, never by reloading an applicant's partially filled form.
    const overviewLink=tab.page.getByRole('tab',{name:'Overview',exact:true});
@@ -53,17 +55,45 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   }
   const inspection=await super.inspect(job,{tabId:tab.id});
   if(new URL(job.url).hostname==='jobs.ashbyhq.com')inspection.description=overview;
+  try{
+   const evidence=await this.evidenceLoader(job),norm=s=>String(s).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+   if(evidence&&norm(evidence.title)===norm(job.title)&&evidence.posting===job.url){
+    inspection.compensation=evidence.compensation;inspection.publicEvidence={posting:job.url,sourceUrl:evidence.sourceUrl,checkedAt:new Date().toISOString()};
+    if(evidence.location==='Remote, United States'&&!/Location Type\s*(?:Hybrid|On.?site)|\bexcept\b|\bexcluding\b|only (?:candidates|residents)|not eligible|must (?:reside|live|relocate)|\brequired.*(?:onsite|on-site|office)\b/i.test(applicationText+'\n'+overview))inspection.location=evidence.location;
+   }
+  }catch{/* Missing public evidence remains a hold, never a guessed salary. */}
+  if(/Location Type\s*(?:Hybrid|On.?site)/i.test(applicationText+'\n'+overview))inspection.location='Location restrictions require review';
+  const groups=await tab.page.evaluate(()=>[...document.querySelectorAll('.ashby-application-form-field-entry[data-field-path]')].filter(e=>e.getClientRects().length).flatMap(e=>{
+   const buttons=[...e.querySelectorAll('button[aria-pressed]')].filter(b=>b.getClientRects().length),label=e.querySelector('label');
+   if(!label)return [];
+   if(!buttons.length){const combo=e.querySelector('button[role="combobox"],input[role="combobox"]');return combo?[{id:e.getAttribute('data-field-path'),selector:'[data-field-path='+JSON.stringify(e.getAttribute('data-field-path'))+'] '+combo.tagName.toLowerCase()+'[role="combobox"]',label:label.innerText.trim(),type:'select',required:/required/i.test(label.className)||combo.getAttribute('aria-required')==='true',value:combo.tagName==='INPUT'?combo.value:/^select/i.test(combo.innerText.trim())?'':combo.innerText.trim(),options:[]}]:[];}
+   return [{id:e.getAttribute('data-field-path'),selector:'[data-field-path='+JSON.stringify(e.getAttribute('data-field-path'))+']',label:label.innerText.trim(),type:'button-choice',required:/required/i.test(label.className)||label.getAttribute('aria-required')==='true',value:buttons.find(b=>b.getAttribute('aria-pressed')==='true')?.innerText.trim()||'',options:buttons.map(b=>b.innerText.trim())}];
+  }));
+  const radioGroups=await tab.page.evaluate(()=>[...document.querySelectorAll('fieldset.ashby-application-form-input-radio-group')].filter(e=>e.getClientRects().length).flatMap(e=>{const label=e.querySelector('label.ashby-application-form-question-title'),radios=[...e.querySelectorAll('input[type="radio"]')];if(!label?.htmlFor||!radios.length)return [];const text=r=>[...(r.labels||[])].map(l=>l.innerText.trim()).join(' ');return [{id:label.htmlFor,selector:'fieldset.ashby-application-form-input-radio-group:has(> label[for='+JSON.stringify(label.htmlFor)+'])',label:label.innerText.trim(),type:'radio-choice',required:/required/i.test(label.className),value:radios.find(r=>r.checked)?text(radios.find(r=>r.checked)):'',options:radios.map(text),controlIds:radios.map(r=>r.id)}]}));
+  groups.push(...radioGroups);
+  inspection.form.fields=inspection.form.fields.filter(f=>!groups.some(g=>g.id===f.id||g.type==='select'&&f.type==='select'&&g.label===f.label||g.controlIds?.includes(f.id)));inspection.form.fields.push(...groups);
+  for(const field of inspection.form.fields){
+   if(inspection.location==='Remote, United States')field.countryContext='US';
+   if(field.id&&!field.selector){const control=this.locator(tab,field);if(await control.count()===1){
+    const details=await control.evaluate(e=>{const entry=e.closest('.ashby-application-form-field-entry[data-field-path]'),label=entry?.querySelector('.ashby-application-form-question-title,label');const selected=e.closest('[class*="select__control"]')?.querySelector('[class*="multi-value__label"], [class*="multiValueLabel"]');return {required:!!label&&/required/i.test(label.className),selected:selected?.textContent?.trim()||''}});
+    field.required=field.required||details.required;if(!field.value&&details.selected)field.value=details.selected;
+    if(field.type==='checkbox')field.value=String(await control.isChecked());
+   }}
+  }
+  const ownUpload=this.uploads[job.id];if(ownUpload&&inspection.form.resume&&(await tab.page.locator('body').innerText()).includes(ownUpload.filename))inspection.form.resume.attached=true;
   const unsupported=await tab.page.evaluate(()=>{
    const visible=e=>e.getClientRects().length>0&&e.getBoundingClientRect().width>1&&getComputedStyle(e).visibility!=='hidden';
-   const controls=[...document.querySelectorAll('input[type="radio"], [role="radiogroup"],button[role="combobox"], [role="checkbox"]')].filter(visible);
-   const labels=controls.map(e=>e.getAttribute('aria-label')||e.closest('fieldset')?.querySelector('legend')?.innerText||e.closest('[class*="field"],[class*="question"]')?.innerText||'Unsupported custom application control');
+   const controls=[...document.querySelectorAll('input[type="radio"], [role="radiogroup"],button[role="combobox"], [role="checkbox"]')].filter(visible).filter(e=>!(e.matches('button[role="combobox"]')&&e.closest('.ashby-application-form-field-entry[data-field-path]')?.querySelector('label'))).filter(e=>!e.closest('fieldset.ashby-application-form-input-radio-group')?.querySelector('label.ashby-application-form-question-title'));
+   const labels=controls.map(e=>{const parent=e.closest('.ashby-application-form-field-entry[data-field-path]')||e.closest('fieldset,[class*="field"],[class*="question"]'),heading=parent?.querySelector('.ashby-application-form-question-title,legend,label');return {label:e.getAttribute('aria-label')||heading?.innerText||parent?.innerText||'Unsupported custom application control',required:parent?!!(e.required||e.getAttribute('aria-required')==='true'||/required/i.test(heading?.className||'')):true};});
    // Unlabelled visible inputs cannot safely disappear from required checks.
-   return [...new Set(labels)];
+   return labels.filter((label,index)=>labels.findIndex(other=>other.label===label.label)===index);
   });
-  for(const label of unsupported)inspection.form.fields.push({id:'',label:'Manual control: '+label.slice(0,240),type:'manual',required:true,value:''});
+  for(const item of unsupported)inspection.form.fields.push({id:'',label:'Manual control: '+item.label.slice(0,240),type:'manual',required:item.required,value:''});
+  for(const file of await tab.page.locator('input[type="file"][required]').all()){const id=await file.getAttribute('id');if(id!==inspection.form.resume?.id)inspection.form.fields.push({id:'',label:'Additional required file: '+(id||'unlabelled upload'),type:'manual',required:true,value:''});}
   return inspection;
  }
  locator(tab,field){
+  if(field.selector)return tab.page.locator(field.selector);
   if(field.id)return tab.page.locator('[id='+JSON.stringify(field.id)+']');
   return tab.page.getByLabel(field.label.replace(/\*$/,'').trim(),{exact:true});
  }
@@ -73,14 +103,19 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
    this.lastControl=field.label;
    if(field.value&&sameAnswer(field,field.value,value))continue;
    const control=this.locator(tab,field);
-   if(field.type==='select'){
+   if(field.type==='radio-choice'){
+    const choice=optionForAnswer(field,value,field.options||[]);if(!choice)throw Error('No radio option matches the verified applicant answer');await control.getByRole('radio',{name:choice,exact:true}).check();
+   }else if(field.type==='button-choice'){
+    const choice=optionForAnswer(field,value,field.options||[]);if(!choice)throw Error('No exact button choice matches the verified answer');await control.getByRole('button',{name:choice,exact:true}).click();
+   }else if(field.type==='checkbox'&&field.consentVerified){await control.setChecked(value==='true');
+   }else if(field.type==='select'){
     if(await control.evaluate(e=>e.tagName)==='SELECT')await control.selectOption({label:value});
     else{
      await control.click();
      let options=await tab.page.getByRole('option').allTextContents();
      let choice=optionForAnswer(field,value,options.map(s=>s.trim()));
      if(!choice&&await control.evaluate(e=>e.tagName==='INPUT')){
-      await control.fill(value);await tab.page.getByRole('option').first().waitFor({state:'visible'});
+      await control.fill(field.locationKnown?.city||value);await tab.page.getByRole('option').first().waitFor({state:'visible'});
       options=await tab.page.getByRole('option').allTextContents();choice=optionForAnswer(field,value,options.map(s=>s.trim()));
      }
      if(!choice)throw Error('No exact option matches the verified applicant answer');
