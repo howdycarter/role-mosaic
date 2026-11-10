@@ -51,8 +51,15 @@ export async function livePostingEvidence(job,fetcher=fetch){
   const response=await fetcher(sourceUrl,{redirect:'error',signal:AbortSignal.timeout(10000)});if(!response.ok)return null;const j=await response.json();
   if(String(j.id)!==id)return null;
   const metadata=j.metadata||[],fullTime=metadata.some(m=>m.name==='Time Type'&&/^full[ -]?time$/i.test(m.value||'')),salaried=metadata.some(m=>m.name==='Pay Rate Type'&&m.value==='Salary');
-  const ranges=(j.pay_input_ranges||[]).filter(r=>r.currency_type==='USD'&&/base (?:salary|compensation)/i.test(r.title||'')&&!/\bOTE\b|total compensation|hour|month|CAD/i.test((r.title||'')+' '+(r.blurb||''))&&Number.isFinite(r.min_cents)&&Number.isFinite(r.max_cents)&&r.max_cents>=r.min_cents);
-  const pay=ranges.length===1&&fullTime&&salaried?{min:ranges[0].min_cents/100,max:ranges[0].max_cents/100,currency:'USD',interval:'year',evidence:'Employer Greenhouse base salary band with Full time / Salary metadata'}:null;
+  const ranges=(j.pay_input_ranges||[]).filter(r=>r.currency_type==='USD'&&/base (?:salary|compensation)/i.test((r.title||'')+' '+(r.blurb||''))&&!/\bOTE\b|total compensation|hour|month|CAD/i.test((r.title||'')+' '+(r.blurb||''))&&Number.isFinite(r.min_cents)&&Number.isFinite(r.max_cents)&&r.max_cents>=r.min_cents);
+  let pay=ranges.length===1&&fullTime&&salaried?{min:ranges[0].min_cents/100,max:ranges[0].max_cents/100,currency:'USD',interval:'year',evidence:'Employer Greenhouse base salary band with Full time / Salary metadata'}:null;
+  // GitLab publishes the period in its own compensation handbook, rather
+  // than Greenhouse metadata. Never borrow this policy for another employer.
+  if(!pay&&slug.toLowerCase()==='gitlab'&&ranges.length===1&&ranges[0].title==='United States Salary Range'&&/base salary range does not include any bonuses, equity, or benefits/i.test(ranges[0].blurb||'')){
+   const periodSource='https://handbook.gitlab.com/handbook/total-rewards/compensation/';
+   const policy=await fetcher(periodSource,{redirect:'error',signal:AbortSignal.timeout(10000)});
+   if(policy.ok&&(await policy.text()).replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').includes('Base salary is annual guaranteed pay'))pay={min:ranges[0].min_cents/100,max:ranges[0].max_cents/100,currency:'USD',interval:'year',evidence:'Employer US base-only salary band; annual period verified in employer compensation handbook',periodSource};
+  }
   return {title:j.title,location:j.location?.name||'',compensation:pay,posting:job.url,sourceUrl};
  }
  return null;

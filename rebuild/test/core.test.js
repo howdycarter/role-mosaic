@@ -20,3 +20,19 @@ test('excluded employers and base floors stay out of match set',()=>{
  assert.equal(evaluate({...job,company:'Excluded'}, {...config,excludeEmployers:['Excluded']}).disposition,'review');
  assert.equal(evaluate({...job,compensation:{min:180000,currency:'USD',interval:'year'}},config).disposition,'review');
 });
+
+test('reviewed never-submitted holds are scoped to exact row bytes and posting; submitted and uncertain records always block',async()=>{
+ const {reapplicationHistory}=await import('../src/core.js'),{digest}=await import('../src/applications.js');const row={company:'Example',role:'Director of Product',posting:job.url,status:'held'};
+ const review={verifiedNeverSubmitted:true,historyRowSha256:digest(row),posting:job.url,reviewedAt:'2026-01-02T00:00:00Z',evidence:'Required factual answer now confirmed; original hold explicitly never submitted'};
+ assert.deepEqual(reapplicationHistory(job,[row],[review]),[]);assert.deepEqual(reapplicationHistory({...job,url:job.url+'/other'},[row],[review]),[row]);
+ for(const status of ['submitted','submission_unknown','unconfirmed']){const r={...row,status};assert.deepEqual(reapplicationHistory(job,[r],[{...review,historyRowSha256:digest(r)}]),[r]);}
+ assert.deepEqual(reapplicationHistory(job,[{...row,note:'changed'}],[review]),[{...row,note:'changed'}]);
+});
+
+test('explicit overlapping salary bands preserve the applicant minimum and do not infer currency, period or invalid bounds',()=>{
+ const overlap={...config,salaryRangeMode:'overlap'},band={min:180000,max:240000,currency:'USD',interval:'year'};
+ assert.equal(evaluate({...job,compensation:band},config).disposition,'review');assert.equal(evaluate({...job,compensation:band},overlap).disposition,'match');
+ assert.equal(evaluate({...job,compensation:{...band,max:185000}},overlap).disposition,'review');
+ for(const change of [{currency:'CAD'},{interval:'month'},{max:170000},{max:undefined}])assert.equal(evaluate({...job,compensation:{...band,...change}},overlap).disposition,'review');
+ assert.equal(evaluate(job,{...config,salaryRangeMode:'unknown'}).disposition,'review');
+});

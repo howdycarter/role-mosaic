@@ -217,3 +217,13 @@ test('legal and preferred name aliases use existing facts, while combined author
  assert.equal(answerFor({label:'Are you legally authorized to work in this location?',countryContext:'Canada',options},p),undefined);
  const field={label:'What location do you intend to work from?',type:'select',required:true};const plan=fillPlan({fields:[field]},p);assert.equal(plan.actions[0].value,'Austin, Texas, United States');assert.equal(field.locationKnown.stateCode,'TX');
 });
+
+test('complete verified employment history supports named prior-employer checks but never acquired-company or future-terms assumptions',()=>{
+ const p={facts:{employmentHistoryComplete:true,employmentHistoryEmployers:['Example'],employmentRestrictions:false},applyingCompany:'Other'};
+ assert.equal(answerFor({label:'Have you ever been employed by Other?'},p),'No');
+ assert.equal(answerFor({label:'Have you ever worked at Other or an acquired company?'},p),undefined);
+ assert.equal(answerFor({label:'Have you ever been employed by Example?'},{...p,applyingCompany:'Example'}),'Yes');
+ assert.equal(answerFor({label:'Have you ever been employed by Other?'},{...p,facts:{...p.facts,employmentHistoryComplete:false}}),undefined);
+ assert.equal(answerFor({label:'Are you subject to any agreements with current or former employers that restrict taking a role?'},p),'No');
+ assert.equal(answerFor({label:'Will you agree to our employment agreement?'},p),undefined);
+});

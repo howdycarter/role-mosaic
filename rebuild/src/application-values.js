@@ -1,6 +1,8 @@
 export function optionForAnswer(field,answer,options){
  const value=String(answer),label=field.label.replace(/[*:]/g,'').trim().toLowerCase();
  const exact=options.find(s=>s.toLowerCase()===value.toLowerCase());if(exact)return exact;
+ const us=s=>/^(united states(?: of america)?|usa|us)$/i.test(String(s).replace(/\s*\+\d+\s*$/,'').trim());
+ if(/\bcountry\b/i.test(label)&&us(value))return options.find(us);
  if(field.locationKnown){
   const expected=field.locationKnown,norm=s=>String(s).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
   return options.find(option=>{const parts=option.split(',').map(norm);return parts.length>=2&&parts[0]===norm(expected.city)&&[norm(expected.state),norm(expected.stateCode)].includes(parts[1])&&(!parts[2]?field.countryContext==='US':/^(united states(?: of america)?|us|usa)$/.test(parts[2])&&expected.country==='United States');});

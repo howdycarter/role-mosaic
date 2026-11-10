@@ -45,3 +45,9 @@ test('confirmation waits for delayed same-posting receipt and never invokes a cl
   assert.equal(result.confirmed,true);assert.ok(reads>=2);assert.equal((await readFile(result.screenshot)).toString(),'synthetic screenshot');
  }finally{await rm(root,{recursive:true,force:true});}
 });
+
+test('US country aliases preserve country identity and never accept a shared Canadian dialing code',()=>{
+ assert.equal(optionForAnswer({label:'What is your current country of residence?'},'United States',['Canada','United States of America']),'United States of America');
+ assert.equal(optionForAnswer({label:'Country'},'United States',['Canada +1','United States +1']),'United States +1');
+ assert.equal(sameAnswer({label:'Country'},'+1','United States'),false);
+});

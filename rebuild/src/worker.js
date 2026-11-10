@@ -1,8 +1,9 @@
 import {open,unlink,mkdir} from 'node:fs/promises';
 import path from 'node:path';
 import {ApplicationStore,prepareApplications,runApplications,reconcileApplications,postingKey,authorizationMatches,standingAuthorizationMatches,supportedPosting} from './applications.js';
-import {evaluate,mergeJobs,historyMatch} from './core.js';
+import {evaluate,mergeJobs,historyMatch,reapplicationHistory} from './core.js';
 import {fetchBoard} from './sources.js';
+import {campaignProgress} from './campaign.js';
 
 export const workerDefaults={enabled:false,intervalMinutes:30,maxInspections:15,headless:false,channel:'chrome',autoSubmitApproved:true};
 export class MosaicWorker {
@@ -14,6 +15,12 @@ export class MosaicWorker {
  async config(){const c={...workerDefaults,...await this.store.read('worker.json',{})};if(!Number.isFinite(c.intervalMinutes)||c.intervalMinutes<1||c.intervalMinutes>1440||!Number.isInteger(c.maxInspections)||c.maxInspections<1||c.maxInspections>30||!['chrome','chromium'].includes(c.channel))throw Error('Invalid worker configuration');return c;}
  async browser(){if(!this.adapter){if(!this.adapterPromise)this.adapterPromise=this.config().then(c=>this.adapterFactory(c));try{this.adapter=await this.adapterPromise;}finally{this.adapterPromise=null;}}return this.adapter;}
  async persist(){await this.store.write('worker-state.json',this.status);}
+ async canContinue(){this.status.campaign=await campaignProgress({home:this.home});return !this.paused&&!this.status.campaign.complete;}
+ async stopAtTarget(){
+  this.status.campaign=await campaignProgress({home:this.home});
+  if(!this.status.campaign.complete)return false;
+  await this.pause();this.status.state='complete';this.status.stage='campaign target reached';return true;
+ }
  async start(){const c=await this.config();this.paused=false;await this.store.write('worker.json',{...c,enabled:true});clearInterval(this.timer);this.timer=setInterval(()=>{this.cycle().catch(()=>{});},c.intervalMinutes*60000);this.timer.unref?.();this.status.state='idle';await this.persist();return this.cycle();}
  async pause(){this.paused=true;clearInterval(this.timer);this.timer=null;await this.store.write('worker.json',{...await this.config(),enabled:false});this.status.pauseRequested=this.running;this.status.state=this.running?'pausing':'paused';await this.persist();return this.status;}
  async stop(){await this.pause();if(this.running)throw Error('Worker is finishing its current operation; browser preserved');if(this.adapter)await this.adapter.close();this.adapter=null;}
@@ -38,6 +45,7 @@ export class MosaicWorker {
   this.running=true;this.status={...this.status,state:'running',stage:'starting',error:null,startedAt:new Date().toISOString()};await handle.writeFile(JSON.stringify({pid:process.pid,startedAt:this.status.startedAt}));await handle.close();
   try{
    const config=await this.config();await this.persist();
+   if(await this.stopAtTarget())return this.status;
    const notion=await this.store.read('notion-connection.json',{});
    if(notion.enabled&&!this.paused){this.status.stage='Notion sync';await this.persist();const {syncNotion}=await import('./notion-sync.js');this.status.notion=await syncNotion({home:this.home,fetcher:this.fetcher});}
    if(discover&&!this.paused){this.status.stage='discovery';await this.persist();await this.discover();}
@@ -54,18 +62,21 @@ export class MosaicWorker {
     this.status.stage='approved applications';await this.persist();
     // One packet at a time permits Pause between applications. Engine writes
     // durable submission_unknown BEFORE its only final submission click.
-    for(const packet of authorized){if(this.paused)break;await runApplications({home:this.home,adapter,packetIds:[packet.id],shouldContinue:()=>!this.paused});}
+    for(const packet of authorized){if(!await this.canContinue())break;await runApplications({home:this.home,adapter,packetIds:[packet.id],shouldContinue:()=>this.canContinue()});}
    }
+   if(await this.stopAtTarget())return this.status;
    ledger=await this.store.read('application-ledger.json',[]);
    const pending=plan.packets.filter(p=>Date.parse(p.expiresAt)>Date.now()&&!ledger.some(a=>a.packetDigest===p.digest));
    if(prepare&&!pending.length&&!this.paused){
     this.status.stage='preparing applications';await this.persist();
     const [jobs,search,history,seen]=await Promise.all([this.store.read('jobs.json',[]),this.store.read('search.json',{}),this.store.read('history.json',[]),this.store.read('worker-inspected.json',{})]);
+    const reviews=await this.store.read('reapplication-reviews.json',[]);
     const candidates=jobs.filter(j=>{
+     const blockingHistory=reapplicationHistory(j,history,reviews);
      if(!supportedPosting(j.url))return false;
      if(jobIds&&!jobIds.includes(j.id))return false;
-     if(['applied','dismissed','rejected'].includes(j.status)||historyMatch(j,history)||ledger.some(a=>a.jobId===j.id))return false;
-     if(history.some(r=>{try{return r.posting&&postingKey(r.posting)===postingKey(j.url)}catch{return false}}))return false;
+     if(['applied','dismissed','rejected'].includes(j.status)||historyMatch(j,blockingHistory)||ledger.some(a=>a.jobId===j.id))return false;
+     if(blockingHistory.some(r=>{try{return r.posting&&postingKey(r.posting)===postingKey(j.url)}catch{return false}}))return false;
      if(!jobIds&&seen[j.id]&&Date.now()-Date.parse(seen[j.id])<24*60*60000)return false;
      const fit=evaluate({...j,compensation:j.compensation||{min:search.minAnnualBaseUsd,currency:'USD',interval:'year'}},search);
      return /director|vice president|\bvp\b|head|chief/i.test(j.title)&&!fit.reasons.some(r=>!['Annual USD base compensation needs verification','Location needs review'].includes(r));
@@ -77,10 +88,11 @@ export class MosaicWorker {
      plan=await prepareApplications({home:this.home,adapter,jobIds:candidates.map(j=>j.id)});
      for(const j of candidates)seen[j.id]=new Date().toISOString();await this.store.write('worker-inspected.json',seen);
      const journal=await this.store.read('application-preflight-history.json',[]);journal.push({at:new Date().toISOString(),held:plan.held,prepared:plan.packets.map(p=>({id:p.id,company:p.job.company,title:p.job.title}))});await this.store.write('application-preflight-history.json',journal);
-     if(submit&&config.autoSubmitApproved&&!this.paused){for(const packet of plan.packets){if(this.paused)break;if(standingAuthorizationMatches(await this.store.read('application-policy.json',{}),packet,adapter))await runApplications({home:this.home,adapter,packetIds:[packet.id],shouldContinue:()=>!this.paused});}}
+     if(submit&&config.autoSubmitApproved&&!this.paused){for(const packet of plan.packets){if(!await this.canContinue())break;if(standingAuthorizationMatches(await this.store.read('application-policy.json',{}),packet,adapter))await runApplications({home:this.home,adapter,packetIds:[packet.id],shouldContinue:()=>this.canContinue()});}}
     }
    }
    ledger=await this.store.read('application-ledger.json',[]);this.status.authorizationMode=policy.authorizationMode||'per-posting-packet';
+   if(await this.stopAtTarget())return this.status;
    this.status.plan={prepared:plan.packets.filter(p=>!ledger.some(a=>a.packetDigest===p.digest)&&Date.parse(p.expiresAt)>Date.now()).length,held:plan.held};
    this.status.lastRun=new Date().toISOString();this.status.state=this.paused?'paused':'idle';this.status.stage='finished';return this.status;
   }catch(e){this.status.state='error';this.status.error=String(e.message).slice(0,300);throw e;}
@@ -90,7 +102,7 @@ export class MosaicWorker {
   if(this.running)throw Error('Worker already running');
   const lock=path.join(this.home,'worker-run.lock');let handle;try{handle=await open(lock,'wx',0o600);}catch(e){if(e.code==='EEXIST')throw Error('Another worker owns this workspace');throw e;}
   this.running=true;this.paused=false;this.status.state='running';this.status.stage='continuing reviewed draft';this.status.error=null;await this.persist();
-  try{await handle.writeFile(JSON.stringify({pid:process.pid,startedAt:new Date().toISOString()}));await handle.close();const adapter=await this.browser();const result=await runApplications({home:this.home,adapter,resumeAttemptId:attemptId});this.status.lastRun=new Date().toISOString();this.status.state=this.paused?'paused':'idle';this.status.stage='finished';return result;}catch(e){this.status.state='error';this.status.error=String(e.message).slice(0,300);throw e;}finally{this.running=false;await this.persist();await unlink(lock);}
+  try{await handle.writeFile(JSON.stringify({pid:process.pid,startedAt:new Date().toISOString()}));await handle.close();if(await this.stopAtTarget())return [];const adapter=await this.browser();const result=await runApplications({home:this.home,adapter,resumeAttemptId:attemptId,shouldContinue:()=>this.canContinue()});this.status.lastRun=new Date().toISOString();if(!await this.stopAtTarget()){this.status.state=this.paused?'paused':'idle';this.status.stage='finished';}return result;}catch(e){this.status.state='error';this.status.error=String(e.message).slice(0,300);throw e;}finally{this.running=false;await this.persist();await unlink(lock);}
  }
  async review(attemptId){
   if(this.running)throw Error('Wait for the current worker operation');
@@ -100,8 +112,10 @@ export class MosaicWorker {
   if(!page)throw Error('Preserved browser page unavailable; no new form was opened');
   await page.bringToFront();
   const directory=path.join(this.home,'receipts');await mkdir(directory,{recursive:true,mode:0o700});
-  const screenshot=path.join(directory,attempt.id+'-held.png');await page.screenshot({path:screenshot,fullPage:true});
-  const review=await page.evaluate(()=>({visibleOptions:[...document.querySelectorAll('[role="option"]')].filter(e=>e.getClientRects().length).map(e=>e.textContent.trim()),fields:[...document.querySelectorAll('input:not([type="hidden"]):not([type="password"]),select,textarea')].filter(e=>e.getClientRects().length).map(e=>({id:e.id,label:[...(e.labels||[])].map(l=>l.textContent.trim()).join(' '),value:e.type==='file'?'':e.value||e.closest('[class*="select__control"]')?.querySelector('[class*="single-value"], [class*="singleValue"]')?.textContent||''}))}));
+  const screenshot=path.join(directory,attempt.id+'-held.png');
+  const verificationInputs=page.locator('input[autocomplete="one-time-code"],input[maxlength="1"],input[id*="security" i],input[id*="otp" i],input[name*="verification" i],input[name*="token" i]');
+  await page.screenshot({path:screenshot,fullPage:true,mask:[verificationInputs]});
+  const review=await page.evaluate(()=>({visibility:document.visibilityState,focused:document.hasFocus(),visibleOptions:[...document.querySelectorAll('[role="option"]')].filter(e=>e.getClientRects().length).map(e=>e.textContent.trim()),fields:[...document.querySelectorAll('input:not([type="hidden"]):not([type="password"]),select,textarea')].filter(e=>e.getClientRects().length).map(e=>({id:e.id,label:[...(e.labels||[])].map(l=>l.textContent.trim()).join(' '),required:e.required||e.getAttribute('aria-required')==='true',value:e.type==='file'?'':e.autocomplete==='one-time-code'||e.maxLength===1||/verification|security.?code|one.?time|\botp\b|password|api.?key|token/i.test(e.id+' '+e.name+' '+e.getAttribute('aria-label'))?'[verification value withheld]':e.value||e.closest('[class*="select__control"]')?.querySelector('[class*="single-value"], [class*="singleValue"]')?.textContent||''})),alerts:[...document.querySelectorAll('[role="alert"]')].filter(e=>e.getClientRects().length).map(e=>e.innerText.slice(0,300)),captchaFrames:[...document.querySelectorAll('iframe')].filter(e=>/captcha|challenge/i.test(e.title)).map(e=>({title:e.title,visibility:getComputedStyle(e).visibility,rect:{x:e.getBoundingClientRect().x,y:e.getBoundingClientRect().y,width:e.getBoundingClientRect().width,height:e.getBoundingClientRect().height},parentVisibility:getComputedStyle(e.parentElement).visibility,parentDisplay:getComputedStyle(e.parentElement).display}))}));
   await this.store.write('worker-held-review.json',{attemptId,screenshot,...review});return {attemptId,screenshot,...review};
  }
 }

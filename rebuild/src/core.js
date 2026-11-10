@@ -10,6 +10,12 @@ export function compensation(job, config) {
  if (!Number.isFinite(config.minAnnualBaseUsd) || config.minAnnualBaseUsd < 0) return {pass:false,reason:'Configure your annual USD base salary floor'};
  const c=job.compensation;
  if (!c || c.currency!=='USD' || c.interval!=='year' || !Number.isFinite(c.min)) return {pass:false,reason:'Annual USD base compensation needs verification'};
+ if(c.max!==undefined&&(!Number.isFinite(c.max)||c.max<c.min))return {pass:false,reason:'Published base compensation range is invalid'};
+ if(config.salaryRangeMode!==undefined&&!['minimum','overlap'].includes(config.salaryRangeMode))return {pass:false,reason:'Configure a valid salary range mode'};
+ if(config.salaryRangeMode==='overlap'){
+  const pass=c.min>=config.minAnnualBaseUsd||Number.isFinite(c.max)&&c.max>=config.minAnnualBaseUsd;
+  return {pass,reason:pass?'Published base range can meet the applicant minimum':'Published base range cannot meet the applicant minimum'};
+ }
  return {pass:c.min>=config.minAnnualBaseUsd,reason:c.min>=config.minAnnualBaseUsd?'Published base range meets floor':'Published base range starts below salary floor'};
 }
 export function evaluate(job, config) {
@@ -35,4 +41,10 @@ export function mergeJobs(existing,incoming) {
 export function historyMatch(job,rows) {
  const norm=s=>(s||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
  return rows.find(r=>(r.posting&&job.url&&(()=>{try{return canonical(r.posting)===canonical(job.url)}catch{return false}})())||(norm(r.company)&&norm(r.company)===norm(job.company)&&norm(r.role)&&norm(r.role)===norm(job.title)))??null;
+}
+/** Only a locally verified, exact never-submitted hold can cease blocking. */
+export function reapplicationHistory(job,rows,reviews=[]) {
+ const scoped=reviews.filter(r=>{try{return canonical(r.posting)===canonical(job.url)}catch{return false}});
+ if(!scoped.length)return rows;
+ return rows.filter(row=>!(['held','skipped'].includes(row.status)&&scoped.some(r=>r.verifiedNeverSubmitted===true&&r.evidence?.trim()&&Number.isFinite(Date.parse(r.reviewedAt))&&r.historyRowSha256===createHash('sha256').update(JSON.stringify(row)).digest('hex'))));
 }

@@ -71,6 +71,8 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   }));
   const radioGroups=await tab.page.evaluate(()=>[...document.querySelectorAll('fieldset.ashby-application-form-input-radio-group')].filter(e=>e.getClientRects().length).flatMap(e=>{const label=e.querySelector('label.ashby-application-form-question-title'),radios=[...e.querySelectorAll('input[type="radio"]')];if(!label?.htmlFor||!radios.length)return [];const text=r=>[...(r.labels||[])].map(l=>l.innerText.trim()).join(' ');return [{id:label.htmlFor,selector:'fieldset.ashby-application-form-input-radio-group:has(> label[for='+JSON.stringify(label.htmlFor)+'])',label:label.innerText.trim(),type:'radio-choice',required:/required/i.test(label.className),value:radios.find(r=>r.checked)?text(radios.find(r=>r.checked)):'',options:radios.map(text),controlIds:radios.map(r=>r.id)}]}));
   groups.push(...radioGroups);
+  const fieldsetCombos=await tab.page.evaluate(()=>[...document.querySelectorAll('fieldset')].filter(e=>e.getClientRects().length&&!e.matches('.ashby-application-form-input-radio-group')).flatMap(e=>{const label=e.querySelector('label.ashby-application-form-question-title'),control=e.querySelector('input[role="combobox"],button[role="combobox"]');return label?.htmlFor&&control?[{id:label.htmlFor,selector:'fieldset:has(> label[for='+JSON.stringify(label.htmlFor)+']) [role="combobox"]',label:label.innerText.trim(),type:'select',required:/required/i.test(label.className),value:control.tagName==='INPUT'?control.value:/^select/i.test(control.innerText.trim())?'':control.innerText.trim(),options:[]}]:[]}));
+  groups.push(...fieldsetCombos);
   inspection.form.fields=inspection.form.fields.filter(f=>!groups.some(g=>g.id===f.id||g.type==='select'&&f.type==='select'&&g.label===f.label||g.controlIds?.includes(f.id)));inspection.form.fields.push(...groups);
   for(const field of inspection.form.fields){
    if(inspection.location==='Remote, United States')field.countryContext='US';
@@ -83,12 +85,15 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   const ownUpload=this.uploads[job.id];if(ownUpload&&inspection.form.resume&&(await tab.page.locator('body').innerText()).includes(ownUpload.filename))inspection.form.resume.attached=true;
   const unsupported=await tab.page.evaluate(()=>{
    const visible=e=>e.getClientRects().length>0&&e.getBoundingClientRect().width>1&&getComputedStyle(e).visibility!=='hidden';
-   const controls=[...document.querySelectorAll('input[type="radio"], [role="radiogroup"],button[role="combobox"], [role="checkbox"]')].filter(visible).filter(e=>!(e.matches('button[role="combobox"]')&&e.closest('.ashby-application-form-field-entry[data-field-path]')?.querySelector('label'))).filter(e=>!e.closest('fieldset.ashby-application-form-input-radio-group')?.querySelector('label.ashby-application-form-question-title'));
+   const controls=[...document.querySelectorAll('input[type="radio"], [role="radiogroup"],button[role="combobox"], [role="checkbox"]')].filter(visible).filter(e=>!(e.matches('button[role="combobox"]')&&(e.closest('.ashby-application-form-field-entry[data-field-path]')?.querySelector('label')||e.closest('fieldset')?.querySelector('label.ashby-application-form-question-title')?.htmlFor))).filter(e=>!e.closest('fieldset.ashby-application-form-input-radio-group')?.querySelector('label.ashby-application-form-question-title'));
    const labels=controls.map(e=>{const parent=e.closest('.ashby-application-form-field-entry[data-field-path]')||e.closest('fieldset,[class*="field"],[class*="question"]'),heading=parent?.querySelector('.ashby-application-form-question-title,legend,label');return {label:e.getAttribute('aria-label')||heading?.innerText||parent?.innerText||'Unsupported custom application control',required:parent?!!(e.required||e.getAttribute('aria-required')==='true'||/required/i.test(heading?.className||'')):true};});
    // Unlabelled visible inputs cannot safely disappear from required checks.
    return labels.filter((label,index)=>labels.findIndex(other=>other.label===label.label)===index);
   });
   for(const item of unsupported)inspection.form.fields.push({id:'',label:'Manual control: '+item.label.slice(0,240),type:'manual',required:item.required,value:''});
+  const requiredLabels=await tab.page.locator('label.ashby-application-form-question-title').evaluateAll(labels=>labels.filter(l=>l.getClientRects().length&&/required/i.test(l.className)).map(l=>l.innerText.trim()));
+  const normalized=s=>s.replace(/[*:]/g,'').replace(/\s+/g,' ').trim();
+  for(const label of requiredLabels){const fields=inspection.form.fields.filter(f=>normalized(f.label)===normalized(label));if(fields.length===1)fields[0].required=true;else if(!fields.length&&normalized(label)!==normalized(inspection.form.resume?.label||''))inspection.form.fields.push({id:'',label:'Manual control: '+label,type:'manual',required:true,value:''});}
   for(const file of await tab.page.locator('input[type="file"][required]').all()){const id=await file.getAttribute('id');if(id!==inspection.form.resume?.id)inspection.form.fields.push({id:'',label:'Additional required file: '+(id||'unlabelled upload'),type:'manual',required:true,value:''});}
   return inspection;
  }
@@ -99,9 +104,10 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
  }
  async fill(inspection,actions,resume){
   const tab=inspection.tab;
+  await tab.page.bringToFront();
   for(const {field,value} of actions){
    this.lastControl=field.label;
-   if(field.value&&sameAnswer(field,field.value,value))continue;
+   if(field.type!=='select'&&field.value&&sameAnswer(field,field.value,value))continue;
    const control=this.locator(tab,field);
    if(field.type==='radio-choice'){
     const choice=optionForAnswer(field,value,field.options||[]);if(!choice)throw Error('No radio option matches the verified applicant answer');await control.getByRole('radio',{name:choice,exact:true}).check();
@@ -111,7 +117,8 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
    }else if(field.type==='select'){
     if(await control.evaluate(e=>e.tagName)==='SELECT')await control.selectOption({label:value});
     else{
-     await control.click();
+     const wrapper=tab.page.locator('[class*="select__control"]').filter({has:control});
+     if(await wrapper.count()===1)await wrapper.click();else await control.click();
      let options=await tab.page.getByRole('option').allTextContents();
      let choice=optionForAnswer(field,value,options.map(s=>s.trim()));
      if(!choice&&await control.evaluate(e=>e.tagName==='INPUT')){
@@ -119,7 +126,8 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
       options=await tab.page.getByRole('option').allTextContents();choice=optionForAnswer(field,value,options.map(s=>s.trim()));
      }
      if(!choice)throw Error('No exact option matches the verified applicant answer');
-     await tab.page.getByRole('option',{name:choice,exact:true}).click();
+     const escaped=choice.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+     await tab.page.getByRole('option').filter({hasText:new RegExp('^\\s*'+escaped+'\\s*$')}).click();
     }
    }else if(['checkbox','manual','radio'].includes(field.type))throw Error('Manual control requires applicant review');
    else await control.fill(value);
@@ -134,5 +142,16 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   this.uploads[inspection.job.id]={filename:path.basename(resume),label:inspection.form.resume.label,sha256:digest(await readFile(resume)),uploadedAt:new Date().toISOString()};
   return {resumeUpload:this.uploads[inspection.job.id]};
  }
- async close(){await this.context.close();}
+ async submit(inspection){
+  const page=inspection.tab.page;await page.bringToFront();
+  const events=[];this.submissionEvidence={at:new Date().toISOString(),jobId:inspection.job.id,events};
+  const record=(request,status)=>{try{const url=new URL(request.url());if(events.length<40&&['POST','PUT'].includes(request.method()))events.push({origin:url.origin,path:url.pathname,method:request.method(),status});}catch{}};
+  const response=r=>record(r.request(),r.status()),failed=r=>record(r,'request_failed');page.on('response',response);page.on('requestfailed',failed);
+  this.clearSubmissionListeners=()=>{page.off('response',response);page.off('requestfailed',failed)};
+  try{await super.submit(inspection);}catch(e){this.clearSubmissionListeners();throw e;}
+ }
+ async confirm(inspection){
+  try{const result=await super.confirm(inspection);return {...result,transportEvidence:this.submissionEvidence?.jobId===inspection.job.id?this.submissionEvidence:undefined};}finally{this.clearSubmissionListeners?.();this.clearSubmissionListeners=null;}
+ }
+ async close(){this.clearSubmissionListeners?.();await this.context.close();}
 }

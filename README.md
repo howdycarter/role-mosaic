@@ -6,6 +6,8 @@ A local-first job-search workspace. Bring your own résumé, career history, sea
 
 ## Quick start for a new applicant
 
+For forms and answers that need judgment, use the [Codex + Mosaic paired workflow](docs/CODEX_PAIRING.md). Unattended employer coverage remains experimental; passing fixtures does not prove a real employer accepted an application.
+
 ```bash
 git clone https://github.com/howdycarter/role-mosaic.git
 cd role-mosaic/rebuild

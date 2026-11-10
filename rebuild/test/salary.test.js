@@ -14,3 +14,10 @@ test('base salary evidence preserves range and refuses hourly, foreign and equit
  assert.equal(salaryFromText('Total compensation $200,000 - $250,000 annually'),null);
  assert.equal(salaryFromText('Base pay $200 - $250 per hour'),null);
 });
+
+test('GitLab annual pay requires its live employer policy and exact USD base-only structured band',async()=>{
+ const job={url:'https://job-boards.greenhouse.io/gitlab/jobs/123'},data={id:123,title:'Director of Product',pay_input_ranges:[{title:'United States Salary Range',currency_type:'USD',min_cents:20320000,max_cents:34560000,blurb:'The base salary range does not include any bonuses, equity, or benefits.'}]};let policy=true;
+ const fetcher=async url=>url.includes('boards-api.greenhouse.io')?new Response(JSON.stringify(data)):new Response(policy?'<p>Base salary is annual guaranteed pay</p>':'No period evidence');
+ assert.equal((await livePostingEvidence(job,fetcher)).compensation.min,203200);policy=false;assert.equal((await livePostingEvidence(job,fetcher)).compensation,null);
+ policy=true;assert.equal((await livePostingEvidence({url:job.url.replace('/gitlab/','/other/')},fetcher)).compensation,null);
+});
