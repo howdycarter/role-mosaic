@@ -1,6 +1,6 @@
 import {open,unlink,mkdir} from 'node:fs/promises';
 import path from 'node:path';
-import {ApplicationStore,prepareApplications,runApplications,reconcileApplications,postingKey,authorizationMatches,standingAuthorizationMatches,supportedPosting} from './applications.js';
+import {ApplicationStore,prepareApplications,runApplications,reconcileApplications,postingKey,authorizationMatches,standingAuthorizationMatches,supportedPosting,individualContributorReviewed} from './applications.js';
 import {evaluate,mergeJobs,historyMatch,reapplicationHistory} from './core.js';
 import {fetchBoard} from './sources.js';
 import {campaignProgress} from './campaign.js';
@@ -79,7 +79,7 @@ export class MosaicWorker {
      if(blockingHistory.some(r=>{try{return r.posting&&postingKey(r.posting)===postingKey(j.url)}catch{return false}}))return false;
      if(!jobIds&&seen[j.id]&&Date.now()-Date.parse(seen[j.id])<24*60*60000)return false;
      const fit=evaluate({...j,compensation:j.compensation||{min:search.minAnnualBaseUsd,currency:'USD',interval:'year'}},search);
-     return /director|vice president|\bvp\b|head|chief/i.test(j.title)&&!fit.reasons.some(r=>!['Annual USD base compensation needs verification','Location needs review'].includes(r));
+     return (/director|vice president|\bvp\b|head|chief/i.test(j.title)||individualContributorReviewed(j,policy))&&!fit.reasons.some(r=>!['Annual USD base compensation needs verification','Location needs review'].includes(r));
     }).sort((a,b)=>{
      const rank=j=>evaluate({...j,compensation:j.compensation||{min:search.minAnnualBaseUsd,currency:'USD',interval:'year'}},search).score+(/\bremote\b/i.test(j.location)?5:0);
      return rank(b)-rank(a);

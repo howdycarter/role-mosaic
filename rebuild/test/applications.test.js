@@ -227,3 +227,10 @@ test('complete verified employment history supports named prior-employer checks 
  assert.equal(answerFor({label:'Are you subject to any agreements with current or former employers that restrict taking a role?'},p),'No');
  assert.equal(answerFor({label:'Will you agree to our employment agreement?'},p),undefined);
 });
+
+test('a scoped substantive IC review enables only its unchanged role and applicant scope in the native worker',async()=>{
+ const f=await fixture(),reviewNow=()=>new Date(),prepare=()=>prepareApplications({home:f.root,adapter:f.adapter,now:reviewNow});try{const job={...f.job,title:'Staff Product Designer',description:'Complex enterprise workflow design'};await f.store.write('jobs.json',[job]);const search=await f.store.read('search.json');await f.store.write('search.json',{...search,titleLevels:['staff'],titleFields:['product']});f.adapter.transport='playwright';await configureStandingAuthorization({home:f.root,evidence:'Applicant selected staff design and native automatic submissions',now:reviewNow});assert.equal((await prepare()).packets.length,0);
+ let policy=await f.store.read('application-policy.json'),g=policy.standingAuthorization;policy.individualContributorReviews=[{jobId:job.id,postingKey:postingKey(job.url),jobSha256:digest({title:job.title,location:job.location,description:job.description}),resumeSha256:g.resumeSha256,profileSha256:g.profileSha256,searchSha256:g.searchSha256,reviewedAt:reviewNow().toISOString(),evidence:'Reviewed enterprise design qualifications against verified applicant history; no specialist engineering qualification inferred.'}];await f.store.write('application-policy.json',policy);
+ assert.equal((await prepare()).packets.length,1);await f.store.write('jobs.json',[{...job,description:'Changed specialist requirements'}]);assert.equal((await prepare()).packets.length,0);await f.store.write('jobs.json',[job]);const {MosaicWorker}=await import('../src/worker.js');await new MosaicWorker({home:f.root,adapterFactory:async()=>f.adapter}).cycle({discover:false});assert.deepEqual(f.events,['fill','submit']);
+ }finally{await f.close();}
+});

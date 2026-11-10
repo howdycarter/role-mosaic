@@ -14,6 +14,8 @@ Mosaic discovers roles, checks the configured rules and history, prepares forms,
 
 A held or skipped history record can be reassessed only when evidence establishes it was never submitted and its blocker is resolved. Private `reapplication-reviews.json` pins that decision to the exact original row bytes and posting. The original record remains. Submitted, uncertain and unconfirmed history cannot be bypassed this way; native ledger duplicates also continue to block.
 
+If the applicant's existing search includes Staff or Principal levels, a substantive review can resolve the separate IC-specialization hold. Record it in private `application-policy.json` under `individualContributorReviews`, with `jobId`, `postingKey`, `jobSha256` (the digest of `{title, location, description}`), the current standing grant's `resumeSha256`, `profileSha256` and `searchSha256`, `reviewedAt`, and factual `evidence`. Reviews expire after 24 hours and invalidate when the role or applicant scope changes. They do not expand selected title levels, replace current eligibility/form checks, create packet approvals, or authorize unknown factual answers.
+
 ## Receipts and human exceptions
 
 Unknown after Submit stays unknown until an employer receipt is observed. A filled form, HTTP 200 response, successful tool call or absent confirmation email is not proof of receipt or non-submission. Never retry an uncertain application. Preserve verification windows: restarting Chrome can lose their state. Human verification and account access can require a handoff despite standing application authorization.

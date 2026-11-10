@@ -6,6 +6,11 @@ import { optionForAnswer, sameAnswer } from './application-values.js';
 export { optionForAnswer, sameAnswer } from './application-values.js';
 
 export const digest = value => createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');
+export function individualContributorReviewed(job,policy,at=new Date()) {
+ const grant=policy.standingAuthorization;
+ if(policy.authorizationMode!=='search-rules'||!grant?.enabled)return false;
+ return (policy.individualContributorReviews||[]).some(r=>r.jobId===job.id&&r.postingKey===postingKey(job.url)&&r.jobSha256===digest({title:job.title,location:job.location,description:job.description})&&r.resumeSha256===grant.resumeSha256&&r.profileSha256===grant.profileSha256&&r.searchSha256===grant.searchSha256&&r.evidence?.trim()&&Date.parse(r.reviewedAt)<=at.getTime()&&at.getTime()-Date.parse(r.reviewedAt)<24*60*60*1000);
+}
 export const dayAt = (date, timezone) => new Intl.DateTimeFormat('en-CA',{timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit'}).format(date);
 const questionLabel=value=>String(value).replace(/[*:]/g,'').replace(/\s+/g,' ').trim();
 export function postingKey(raw) {
@@ -180,7 +185,7 @@ export async function prepareApplications({home,adapter,limit=15,jobIds,now=()=>
   if(!supportedPosting(job.url)||duplicate(job,ctx.history,attempts,ctx.reapplicationReviews)||['applied','dismissed','rejected'].includes(job.status))continue;
   const preliminary=evaluate({...job,compensation:job.compensation||{min:ctx.search.minAnnualBaseUsd,currency:'USD',interval:'year'}},ctx.search);
   if(preliminary.reasons.some(r=>!['Annual USD base compensation needs verification','Location needs review'].includes(r)))continue;
-  if(!/director|vice president|\bvp\b|head|chief/i.test(job.title)&&ctx.policy.requireICReview!==false){held.push({id:job.id,company:job.company,title:job.title,reason:'Individual-contributor specialization requires review'});continue;}
+  if(!/director|vice president|\bvp\b|head|chief/i.test(job.title)&&ctx.policy.requireICReview!==false&&!individualContributorReviewed(job,ctx.policy,now())){held.push({id:job.id,company:job.company,title:job.title,reason:'Individual-contributor specialization requires review'});continue;}
   let inspection;try{inspection=await adapter.inspect(job);}catch{held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Posting or form could not be inspected'});continue;}
   if(!inspection.titleVerified||inspection.closed||inspection.login){held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Closed, sign-in required, or title mismatch'});continue;}
   const pay=inspectionSalary(inspection,ctx.profile.facts.stateCode);
