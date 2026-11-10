@@ -6,12 +6,17 @@ export function ashbySalary(compensation){
  return {min:Math.min(...salary.map(c=>c.minValue)),max:Math.max(...salary.map(c=>c.maxValue)),currency:'USD',interval:'year',evidence:'Employer Ashby API: minimum across all published USD annual Salary tiers; Bonus/Equity excluded'};
 }
 function ashbyLocation(job){const countries=[job.address?.postalAddress?.addressCountry,...(job.secondaryLocations||[]).map(l=>l.address?.addressCountry)].filter(Boolean);return job.isRemote&&countries.some(c=>/^(United States|USA|US)$/i.test(c))?'Remote, United States':job.location||'';}
-export function salaryFromText(raw) {
- const text=String(raw).replace(/<[^>]*>/g,' ').replace(/&nbsp;|&#160;/g,' ').replace(/&#36;|&dollar;/g,'$').replace(/\s+/g,' ');
- const m=text.match(/(?:annual\s+)?base\s+(?:salary|pay|compensation)[^.]{0,90}?\$([\d,]+)\s*(?:-|–|—|to)\s*\$([\d,]+)/i);
+const usLocation=location=>/\b(?:United States|USA|US)\b/i.test(location||'')&&!/\bCanada|Europe|United Kingdom|Australia\b/i.test(location||'');
+const otherPeriod=/\b(?:hourly|monthly|weekly|daily|CAD|AUD|GBP|EUR)\b|per\s+(?:hour|month|week|day)\b/i;
+export function salaryFromText(raw,{allowAnnualBaseAssumption=false,location}={}) {
+ const text=String(raw).replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/<[^>]*>/g,' ').replace(/&nbsp;|&#160;/g,' ').replace(/&(?:amp;)?mdash;/g,'—').replace(/&(?:amp;)?ndash;/g,'–').replace(/&#36;|&dollar;/g,'$').replace(/\s+/g,' ');
+ const assumption=allowAnnualBaseAssumption===true&&usLocation(location);
+ const m=text.match(/(?:annual\s+)?base\s+(?:salary|pay|compensation)[^.]{0,90}?\$([\d,]+)\s*(?:-|–|—|to)\s*\$([\d,]+)/i)|| (assumption?text.match(/\$([\d,]+)\s*(?:-|–|—|to)\s*\$([\d,]+)\s+base\s+(?:salary|pay|compensation)/i):null);
  if(!m)return null;const context=text.slice(Math.max(0,m.index-50),m.index+m[0].length+90);
- if(!/\b(annual|annually|per year|yearly|a year)\b/i.test(context)||/\b(CAD|AUD|hourly|monthly|per hour)\b/i.test(context))return null;
- return {min:Number(m[1].replaceAll(',','')),max:Number(m[2].replaceAll(',','')),currency:'USD',interval:'year',evidence:m[0]};
+ const annual=/\b(annual|annually|per year|yearly|a year)\b/i.test(context);
+ if((!annual&&!assumption)||otherPeriod.test(context))return null;
+ const min=Number(m[1].replaceAll(',','')),max=Number(m[2].replaceAll(',',''));if(min<1000||max<min)return null;
+ return {min,max,currency:'USD',interval:'year',...(!annual?{periodAssumed:true}:{}),evidence:m[0]+(!annual?' — applicant-authorized conventional US annual-base assumption':'')};
 }
 export async function fetchBoard(board, fetcher = fetch) {
   if (!allowed.has(board.type) || !/^[a-zA-Z0-9_. -]{1,100}$/.test(board.slug)) throw new Error('Invalid board type or slug');
@@ -38,7 +43,7 @@ export async function fetchBoard(board, fetcher = fetch) {
   })).filter(j => j.title && /^https:\/\//.test(j.url));
 }
 
-export async function livePostingEvidence(job,fetcher=fetch){
+export async function livePostingEvidence(job,fetcher=fetch,rules={}){
  const url=new URL(job.url),parts=url.pathname.split('/').filter(Boolean),slug=decodeURIComponent(parts[0]||'');
  if(!/^[a-zA-Z0-9_. -]{1,100}$/.test(slug))return null;
  if(url.hostname==='jobs.ashbyhq.com'){
@@ -60,6 +65,11 @@ export async function livePostingEvidence(job,fetcher=fetch){
    const policy=await fetcher(periodSource,{redirect:'error',signal:AbortSignal.timeout(10000)});
    if(policy.ok&&(await policy.text()).replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').includes('Base salary is annual guaranteed pay'))pay={min:ranges[0].min_cents/100,max:ranges[0].max_cents/100,currency:'USD',interval:'year',evidence:'Employer US base-only salary band; annual period verified in employer compensation handbook',periodSource};
   }
+  const assumptionAllowed=rules.allowAnnualBaseAssumption===true&&!metadata.some(m=>/part[ -]?time|contract|temporary|hourly|monthly|weekly/i.test(String(m.value||'')));
+  if(!pay&&assumptionAllowed&&usLocation(j.location?.name)&&ranges.length===1&&!otherPeriod.test((ranges[0].title||'')+' '+(ranges[0].blurb||''))){
+   pay={min:ranges[0].min_cents/100,max:ranges[0].max_cents/100,currency:'USD',interval:'year',periodAssumed:true,evidence:'Employer USD base-only range; applicant-authorized conventional annual-period assumption'};
+  }
+  if(!pay)pay=salaryFromText(j.content||'',{allowAnnualBaseAssumption:assumptionAllowed,location:j.location?.name});
   return {title:j.title,location:j.location?.name||'',compensation:pay,posting:job.url,sourceUrl};
  }
  return null;

@@ -21,3 +21,23 @@ test('GitLab annual pay requires its live employer policy and exact USD base-onl
  assert.equal((await livePostingEvidence(job,fetcher)).compensation.min,203200);policy=false;assert.equal((await livePostingEvidence(job,fetcher)).compensation,null);
  policy=true;assert.equal((await livePostingEvidence({url:job.url.replace('/gitlab/','/other/')},fetcher)).compensation,null);
 });
+
+test('opt-in annual assumption accepts an ordinary US base band and preserves assumption provenance',async()=>{
+ const job={url:'https://job-boards.greenhouse.io/example/jobs/123'},data={id:123,title:'Director of Product',location:{name:'Remote - United States'},pay_input_ranges:[{title:'Base Compensation Range',currency_type:'USD',min_cents:18500000,max_cents:25500000}]};
+ const fetcher=async()=>new Response(JSON.stringify(data)),rules={allowAnnualBaseAssumption:true};
+ assert.equal((await livePostingEvidence(job,fetcher)).compensation,null);
+ const pay=(await livePostingEvidence(job,fetcher,rules)).compensation;assert.equal(pay.min,185000);assert.equal(pay.max,255000);assert.equal(pay.interval,'year');assert.equal(pay.periodAssumed,true);
+ data.location.name='Remote - Canada';assert.equal((await livePostingEvidence(job,fetcher,rules)).compensation,null);
+ data.location.name='Remote - United States';data.pay_input_ranges[0].title='Hourly base salary';assert.equal((await livePostingEvidence(job,fetcher,rules)).compensation,null);
+ data.pay_input_ranges[0].title='Base salary per week';assert.equal((await livePostingEvidence(job,fetcher,rules)).compensation,null);
+ data.pay_input_ranges[0].title='Total compensation';assert.equal((await livePostingEvidence(job,fetcher,rules)).compensation,null);
+ data.pay_input_ranges[0].title='Base Salary';data.metadata=[{name:'Time Type',value:'Part time'}];assert.equal((await livePostingEvidence(job,fetcher,rules)).compensation,null);
+});
+test('opt-in conventional annual salary assumption never overrides another currency or pay period',()=>{
+ const rules={allowAnnualBaseAssumption:true,location:'US - NY Area or Remote'};
+ assert.equal(salaryFromText('$200,000 - $225,000 base salary and equity'),null);
+ assert.equal(salaryFromText('$200,000 - $225,000 base salary and equity',rules)?.min,200000);
+ assert.equal(salaryFromText('$200,000 - $225,000 base salary CAD',rules),null);
+ assert.equal(salaryFromText('Base salary $20,000 - $25,000 per month',rules),null);
+ assert.equal(salaryFromText('Base salary $200,000 - $225,000',{...rules,location:'Canada'}),null);
+});

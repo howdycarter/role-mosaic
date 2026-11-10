@@ -34,4 +34,6 @@ The counter deduplicates confirmed ledger receipts by posting identity. Optional
 
 ## Runtime boundaries
 
+Search defaults require annual-base evidence. An applicant can explicitly opt into `allowAnnualBaseAssumption: true` in their private `search.json` for conventional US salaried base ranges whose period is omitted. The native adapter marks those results `periodAssumed: true` and records the assumption in the compensation evidence; it does not present the period as employer-verified. Explicit foreign currencies, hourly/monthly/weekly periods, non-base ranges and contradictory part-time/contract metadata do not qualify. Changing this setting invalidates the old standing grant; record the applicant's actual decision before rebinding it. `salaryRangeMode: "overlap"` separately permits bands that can meet `minAnnualBaseUsd`; the applicant's minimum remains unchanged.
+
 Build and test locally. Keep one scheduler per applicant workspace. The optional Codex Browser adapter has its own action-time confirmation policy; native standing authorization does not override it. Pairing Codex for reasoning does not authorize bypassing employer verification, browser safety controls or the application engine's ledger guards.
