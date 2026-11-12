@@ -17,3 +17,11 @@ test('evidence requires exact verified source quotes and detects changed sources
  const {loadEvidence}=await import('../src/quality.js');assert.equal(typeof loadEvidence,'function');const home=await mkdtemp(path.join(os.tmpdir(),'mosaic-proof-'));
  try{await writeFile(path.join(home,'source.txt'),'Managed 20 people across engineering, design and analytics.');const p={sources:[{id:'source',path:'source.txt',sha256:hash('Managed 20 people across engineering, design and analytics.')}],facts:[{id:'team',verified:true,sourceId:'source',text:'Managed 20 people across engineering, design and analytics.',quote:'Managed 20 people across engineering, design and analytics.',tracks:['product'],capabilities:['people-leadership']},{id:'fake',verified:true,sourceId:'source',quote:'Managed 20 people',text:'Doubled revenue',tracks:['product'],capabilities:['revenue']}],caseStudies:[]};await writeFile(path.join(home,'career-evidence.json'),JSON.stringify(p));let e=await loadEvidence(home);assert.deepEqual(e.facts.map(f=>f.id),['team']);assert.ok(e.issues.length);await writeFile(path.join(home,'source.txt'),'Changed');e=await loadEvidence(home);assert.equal(e.facts.length,0);assert.ok(e.issues.some(s=>/changed|hash/i.test(s)));}finally{await rm(home,{recursive:true,force:true})}
 });
+
+test('FDE has its own track and never inherits an engineering resume or evidence',async()=>{
+ const {roleTrack,assessQuality}=await import('../src/quality.js');
+ for(const title of ['Forward Deployed Engineer','Forward-Deployed AI Engineer','Senior FDE','Senior Forward Deployed Infrastructure Engineer','Engineering Manager, Forward Deployed (Platform)'])assert.equal(roleTrack(title),'fde');
+ assert.equal(roleTrack('FDE Recruiter'),null);assert.equal(roleTrack('Forward Deployed AI Accelerator, Marketing'),null);assert.equal(roleTrack('Director, Forward Deployed Sales Engineer'),null);assert.equal(roleTrack('FDE Product Manager'),'product');
+ const q=assessQuality({title:'Senior Forward Deployed Engineer',description:'Customer-facing production engineering'}, {facts:[{id:'engineering',tracks:['engineering'],capabilities:[]}],caseStudies:[],digest:'source'}, {resume:{track:'engineering',status:'approved',sha256:'old'}});
+ assert.equal(q.ready,false);assert.ok(q.reasons.includes('No source-backed evidence for this track'));assert.equal(q.resume.track,'engineering');
+});

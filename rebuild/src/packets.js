@@ -4,7 +4,7 @@ import {loadEvidence,roleTrack,selectTrackResume,assessQuality,qualityDigest,job
 import {boundedFile} from './career.js';
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 export async function registerTrackResume({home,track,file,confirm}){
- if(!tracks.includes(track)||!file||confirm!==undefined&&confirm!=='reviewed')throw Error('Choose product, design or engineering and a PDF; use --confirm reviewed only after review');
+ if(!tracks.includes(track)||!file||confirm!==undefined&&confirm!=='reviewed')throw Error('Choose product, design, engineering or fde and a PDF; use --confirm reviewed only after review');
  const source=path.resolve(file),bytes=await readFile(source);if(bytes.length>20*1024*1024||bytes.subarray(0,5).toString()!=='%PDF-')throw Error('A PDF of at most 20 MiB is required');
  const sha256=qualityDigest(bytes),store=new ApplicationStore(home),relative=path.join('resume-variants',track+'-'+sha256.slice(0,16)+'.pdf'),destination=path.join(home,relative);await mkdir(path.dirname(destination),{recursive:true,mode:0o700});
  if(source!==destination){try{await copyFile(source,destination,1)}catch(e){if(e.code!=='EEXIST'||qualityDigest(await readFile(destination))!==sha256)throw e;}}

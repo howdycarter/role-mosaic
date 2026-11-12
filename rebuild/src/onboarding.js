@@ -27,6 +27,7 @@ export function validateSearch(search) {
   if (search.minAnnualBaseUsd !== null && (!Number.isFinite(search.minAnnualBaseUsd) || search.minAnnualBaseUsd < 0)) throw Error('Salary floor must be a nonnegative annual USD amount or null');
   if (search.remoteCountry !== 'United States') throw Error('Remote screening currently supports United States only');
   if (search.excludeEmployers !== undefined && (!Array.isArray(search.excludeEmployers) || search.excludeEmployers.some(v => typeof v !== 'string' || !v.trim()))) throw Error('Excluded employers must be a list of nonempty strings');
+  if(search.fdeTarget!==undefined){const f=search.fdeTarget;if(!f||typeof f!=='object'||Array.isArray(f)||typeof f.enabled!=='boolean'||!Array.isArray(f.levels)||!f.levels.length||f.levels.some(v=>typeof v!=='string'||!v.trim())||typeof f.includeUnspecifiedLevel!=='boolean')throw Error('FDE target needs explicit enabled, levels and includeUnspecifiedLevel settings');}
   return search;
 }
 export function validateBoards(boards) {

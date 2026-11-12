@@ -20,10 +20,18 @@ export function compensation(job, config) {
  return {pass:c.min>=config.minAnnualBaseUsd,reason:c.min>=config.minAnnualBaseUsd?'Published base range meets floor':'Published base range starts below salary floor'};
 }
 export function evaluate(job, config) {
- const levels=terms(job.title,config.titleLevels), fields=terms(job.title,config.titleFields), local=terms(job.location,config.localCities);
+ const track=roleTrack(job.title),fde=track==='fde'&&config.fdeTarget?.enabled===true,explicitJunior=/\b(?:junior|entry[ -]level|intern|internship|graduate|new[ -]grad|associate)\b/i.test(job.title);
+ let levels=terms(job.title,config.titleLevels),fields=terms(job.title,config.titleFields);const local=terms(job.location,config.localCities);
+ let unspecifiedFdeLevel=false;
+ if(track==='fde'){
+  fields=fde?['forward deployed engineering']:[];levels=fde&&!explicitJunior?terms(job.title,Array.isArray(config.fdeTarget.levels)?config.fdeTarget.levels:[]):[];
+  if(fde&&!explicitJunior&&!levels.length&&config.fdeTarget.includeUnspecifiedLevel===true&&!/\b(?:senior|staff|principal|lead|founding|director|head|vp|vice president|manager|chief)\b/i.test(job.title)){levels=['FDE level unstated'];unspecifiedFdeLevel=true;}
+ }
  const restricted=/\b(except|excluding|outside|canada|europe|uk|hybrid|on.?site)\b/i.test(job.location);
  const remote=/\bremote\b/i.test(job.location)&&/\b(united states|u\.?s\.?a?\.?|nationwide)\b/i.test(job.location)&&!restricted;
  const reasons=[];
+ if(track==='fde'&&!fde)reasons.push('FDE target is not enabled');
+ if(unspecifiedFdeLevel)reasons.push('FDE seniority is unstated; review required');
  if(!levels.length) reasons.push('Title does not match selected level');
  if(!fields.length) reasons.push('Title does not match selected field');
  if(!local.length&&!remote) reasons.push('Location needs review');

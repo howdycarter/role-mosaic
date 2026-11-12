@@ -2,9 +2,11 @@ import {readFile} from 'node:fs/promises';import path from 'node:path';import {c
 import {boundedFile,htmlText} from './career.js';
 export const qualityDigest=value=>createHash('sha256').update(typeof value==='string'||Buffer.isBuffer(value)?value:JSON.stringify(value)).digest('hex');
 export const jobDigest=job=>qualityDigest({url:job.url,title:job.title,location:job.location,description:job.description});
-export const tracks=['product','design','engineering'];
+export const tracks=['product','design','engineering','fde'];
 export function roleTrack(title){
- if(/talent acquisition|people partners?|human resources|\b(?:legal|counsel|attorney|recruiting|recruiter|product marketing|sales engineering|gtm engineering)\b/i.test(title))return null;
+ if(/talent acquisition|people partners?|human resources|\b(?:legal|counsel|attorney|recruiting|recruiter|product marketing|sales engineering|sales engineer|gtm engineering)\b/i.test(title))return null;
+ const deployed=/\bforward[\s-]+deployed\b/i.test(title),acronym=/\bfde\b/i.test(title),nonEngineering=/\b(?:marketing|account executive|business development|sales development|product manager|product management|designer|design)\b/i.test(title);
+ if(!nonEngineering&&(deployed&&/\b(?:engineer|engineers|engineering)\b/i.test(title)||acronym))return 'fde';
  if(/\b(design|designer|ux|user experience)\b/i.test(title))return 'design';
  if(/\b(engineering|engineer|cto)\b/i.test(title))return 'engineering';
  if(/\bproduct\b/i.test(title))return 'product';return null;

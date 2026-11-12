@@ -69,3 +69,15 @@ Automatic mode requires the explicit risk acknowledgement in the dashboard, a se
 All builds/tests run locally. Keep `career-evidence.json`, sources, reviews, résumé registry, PDFs and generated packets private. No applicant data or API key belongs in the public repository.
 
 Discovery shortlists prioritize evidence and relevant case studies before the title-rule score, then prefer leadership roles. They include at most two roles per employer per preparation batch; explicitly selected roles are preserved. A source-backed quote does not by itself prove every requirement. All incomplete or expired reviews remain holds.
+
+## Forward deployed engineering
+
+FDE is an explicit opt-in track (`fde`), separate from general engineering. Add a private search setting such as:
+
+```json
+{"fdeTarget":{"enabled":true,"levels":["senior","staff","principal","lead","founding","director","head","vp"],"includeUnspecifiedLevel":true}}
+```
+
+This recognizes Forward Deployed Engineer, Forward-Deployed Software/AI Engineer and FDE titles. Its levels apply only to that role family; they do not add general senior engineering roles. Junior, intern and entry-level titles remain outside this scope. Unstated seniority can enter research but requires review. Salary, location, employer exclusions, history and submission safeguards still apply.
+
+Add `fde` to your private `targetTracks` for clarity, and filter it in the dashboard. Register an exact FDE PDF using `register-resume --track fde --file /path/to/fde.pdf`; attachment remains a draft. FDE does not inherit engineering facts, case studies or PDF approval. Add only verified, source-bound FDE-relevant evidence and complete each role's requirements review before treating it as ready. A search target is not a claim that the applicant has held that title or meets every role's requirements.
