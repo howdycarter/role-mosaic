@@ -23,6 +23,13 @@ const server=http.createServer(async(req,res)=>{
   if(req.headers.host!==`127.0.0.1:${server.address().port}`) return send(403,{error:'Local access only'});
   if(req.method==='GET'&&req.url==='/'){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Security-Policy':"default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'"});res.end((await readFile(new URL('../web/index.html',import.meta.url),'utf8')).replace('__TOKEN__',token));return;}
   if(req.method==='GET'&&req.url.startsWith('/api/packet?')){const id=new URL(req.url,'http://'+req.headers.host).searchParams.get('id');if(!/^[a-f0-9]{64}$/.test(id||''))return send(400,{error:'Invalid packet identifier'});let html;try{html=packetHtml(await refreshPacket(home,JSON.parse(await readFile(path.join(home,'packets',id+'.json'),'utf8'))))}catch(e){if(e.code==='ENOENT')return send(404,{error:'Packet not found'});throw e}res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"});res.end(html);return;}
+  if(req.method==='GET'&&req.url==='/api/health') {
+   try {
+    const [policy,workerConfig,ledger,history]=await Promise.all([read('application-policy.json',{}),read('worker.json',{}),read('application-ledger.json',[]),read('history.json',[])]);
+    if(!policy||typeof policy!=='object'||Array.isArray(policy)||!workerConfig||typeof workerConfig!=='object'||Array.isArray(workerConfig)||!Array.isArray(ledger)||!Array.isArray(history))throw Error('Invalid record shape');
+    return send(200,{status:'ok',submissionMode:policy.submissionMode==='automatic'?'automatic':'manual',applicationEnabled:policy.enabled===true,workerEnabled:workerConfig.enabled===true,workerRunning:worker.running,recordsValid:true});
+   }catch{return send(503,{status:'error',recordsValid:false});}
+  }
   if(req.method==='GET'&&req.url==='/api/state') {
    const [jobs,config,history,resume,connections,career,applicationPlan,applicationLedger]=await Promise.all([read('jobs.json',[]),read('search.json',starterSearch),read('history.json',[]),read('notion-resume.json',null),read('connections.json',{}),read('career-history.json',null),read('application-plan.json',{packets:[],held:[]}),read('application-ledger.json',[])]);
    const approvals=await read('application-approvals.json',[]),notion=await read('notion-connection.json',{}),policy=await read('application-policy.json',{});

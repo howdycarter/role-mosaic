@@ -8,6 +8,7 @@ test('local app serves state and refuses unauthorized writes',async()=>{
  const child=spawn(process.execPath,[new URL('../src/server.js',import.meta.url).pathname],{env:{...process.env,ROLEMOSAIC_HOME:dir,PORT:'0'}});
  try{
   const url=await new Promise((resolve,reject)=>{child.stdout.on('data',b=>{const m=String(b).match(/http:\/\/127.0.0.1:\d+/);if(m)resolve(m[0])});child.on('error',reject);child.on('exit',()=>reject(Error('Server exited')))});
+  const health=await fetch(url+'/api/health');assert.equal(health.status,200);assert.deepEqual(await health.json(),{status:'ok',submissionMode:'manual',applicationEnabled:false,workerEnabled:false,workerRunning:false,recordsValid:true});
   const state=await fetch(url+'/api/state');assert.equal(state.status,200);const data=await state.json();assert.deepEqual(data.jobs,[]);assert.equal(data.submissionMode,'manual');
   assert.equal((await fetch(url+'/api/packet?id=../application-policy')).status,400);
   const html=await(await fetch(url)).text(),token=html.match(/const token='([^']+)'/)[1],headers={'Content-Type':'application/json','Origin':url,'X-Rolemosaic-Token':token};
@@ -19,6 +20,7 @@ test('local app serves state and refuses unauthorized writes',async()=>{
   await writeFile(path.join(dir,'synthetic-evidence.txt'),'Source changed');const changed=await(await fetch(url+'/api/state')).json();assert.equal(changed.qualityPackets[0].ready,false);assert.equal(changed.qualityPackets[0].proofCount,0);const staleHtml=await(await fetch(url+'/api/packet?id='+packet.id)).text();assert.match(staleHtml,/Stale — regenerate/);assert.equal(staleHtml.includes('Synthetic product, design and engineering delivery example.'),false);
   const page=await fetch(url);assert.ok((await page.text()).includes('Career history'));
   assert.equal((await fetch(url+'/api/status',{method:'POST',body:'{}'})).status,403);
+  await writeFile(path.join(dir,'application-ledger.json'),'invalid private record');const failed=await fetch(url+'/api/health');assert.equal(failed.status,503);assert.deepEqual(await failed.json(),{status:'error',recordsValid:false});
  }finally{child.kill();await rm(dir,{recursive:true,force:true})}
 });
 
