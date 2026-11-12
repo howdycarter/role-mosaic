@@ -1,3 +1,5 @@
+> **Default:** research and local evidence packets with manual final submission. Use `prepare-packets` and [application quality](APPLICATION_QUALITY.md); do not enable browser execution to work around missing career evidence. The advanced browser APIs below still enforce mode, risk, quality, authorization and verification boundaries.
+
 # Pair Mosaic with Codex
 
 Mosaic's native worker is experimental. Supported-form tests and a running local service do not establish reliable unattended coverage of real employers. Use a paired workflow when eligibility evidence, form controls or answers need judgment.

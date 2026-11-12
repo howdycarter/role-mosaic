@@ -2,7 +2,7 @@
 
 A local-first job-search workspace. Bring your own résumé, career history, search rules, employer boards, and application records. Applicant data stays in your private local workspace and is not included in this repository.
 
-**Start with the independent rebuild in [`rebuild/`](rebuild/README.md).** Mosaic owns a local Playwright browser, job-search worker, dashboard and optional direct Notion connection. It can discover jobs, check your rules/history, prepare applications and independently submit applications under explicitly enabled standing search rules or per-job review without an active Codex chat. CAPTCHA, accounts, unsupported forms and missing facts remain holds. A tracking status is not an employer receipt. Requires Node.js 22+ and no JEV/OpenRouter or AI subscription. All builds, tests and services run locally; no GitHub Actions or Vercel deployment. See [standalone setup](docs/STANDALONE.md).
+**Start with the independent rebuild in [`rebuild/`](rebuild/README.md).** The default is research and local evidence-packet preparation with **manual final submission**. Product, design and engineering use separate résumé registrations; source quotes and role-specific requirement reviews prevent a title match from being presented as proof of qualification. Browser automation can be detected. Experimental automatic execution requires explicit opt-in and additional evidence, résumé and authorization checks. Requires Node.js 22+ and no JEV/OpenRouter or AI subscription. Builds, tests and services run locally; no GitHub Actions or Vercel deployment. See [application quality](docs/APPLICATION_QUALITY.md).
 
 ## Quick start for a new applicant
 

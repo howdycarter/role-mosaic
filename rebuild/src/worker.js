@@ -4,6 +4,7 @@ import {ApplicationStore,prepareApplications,runApplications,reconcileApplicatio
 import {evaluate,mergeJobs,historyMatch,reapplicationHistory} from './core.js';
 import {fetchBoard} from './sources.js';
 import {campaignProgress} from './campaign.js';
+import {prepareQualityPackets} from './packets.js';
 
 export const workerDefaults={enabled:false,intervalMinutes:30,maxInspections:15,headless:false,channel:'chrome',autoSubmitApproved:true};
 export class MosaicWorker {
@@ -50,6 +51,13 @@ export class MosaicWorker {
    if(notion.enabled&&!this.paused){this.status.stage='Notion sync';await this.persist();const {syncNotion}=await import('./notion-sync.js');this.status.notion=await syncNotion({home:this.home,fetcher:this.fetcher});}
    if(discover&&!this.paused){this.status.stage='discovery';await this.persist();await this.discover();}
    if(this.paused){this.status.state='paused';this.status.stage='paused before application work';return this.status;}
+   const executionPolicy=await this.store.read('application-policy.json',{});
+   if(executionPolicy.submissionMode!=='automatic'){
+    this.status.stage='preparing local evidence packets';this.status.submissionMode='manual';await this.persist();
+    const result=prepare?await prepareQualityPackets({home:this.home,jobIds,limit:config.maxInspections}):await this.store.read('quality-packets.json',{packets:[]});
+    this.status.qualityPackets={count:result.packets.length,ready:result.packets.filter(p=>p.quality.ready).length};this.status.plan={prepared:this.status.qualityPackets.ready,held:result.packets.filter(p=>!p.quality.ready).map(p=>({id:p.job.id,company:p.job.company,title:p.job.title,reason:p.quality.reasons.join('; ')}))};this.status.state='idle';this.status.stage='finished';this.status.lastRun=new Date().toISOString();return this.status;
+   }
+   if(executionPolicy.automationRiskAcknowledged!==true)throw Error('Automatic browser submission requires explicit acknowledgement that automation is detectable');
    const adapter=await this.browser();
    this.status.stage='reconciliation';await this.persist();
    // Never fill or re-submit unknown attempts. The adapter uses preserved pages.
@@ -102,7 +110,7 @@ export class MosaicWorker {
   if(this.running)throw Error('Worker already running');
   const lock=path.join(this.home,'worker-run.lock');let handle;try{handle=await open(lock,'wx',0o600);}catch(e){if(e.code==='EEXIST')throw Error('Another worker owns this workspace');throw e;}
   this.running=true;this.paused=false;this.status.state='running';this.status.stage='continuing reviewed draft';this.status.error=null;await this.persist();
-  try{await handle.writeFile(JSON.stringify({pid:process.pid,startedAt:new Date().toISOString()}));await handle.close();if(await this.stopAtTarget())return [];const adapter=await this.browser();const result=await runApplications({home:this.home,adapter,resumeAttemptId:attemptId,shouldContinue:()=>this.canContinue()});this.status.lastRun=new Date().toISOString();if(!await this.stopAtTarget()){this.status.state=this.paused?'paused':'idle';this.status.stage='finished';}return result;}catch(e){this.status.state='error';this.status.error=String(e.message).slice(0,300);throw e;}finally{this.running=false;await this.persist();await unlink(lock);}
+  try{await handle.writeFile(JSON.stringify({pid:process.pid,startedAt:new Date().toISOString()}));await handle.close();if((await this.store.read('application-policy.json',{})).submissionMode!=='automatic'){this.status.state='paused';this.status.stage='manual final submission';return [{status:'review_only'}];}if(await this.stopAtTarget())return [];const adapter=await this.browser();const result=await runApplications({home:this.home,adapter,resumeAttemptId:attemptId,shouldContinue:()=>this.canContinue()});this.status.lastRun=new Date().toISOString();if(!await this.stopAtTarget()){this.status.state=this.paused?'paused':'idle';this.status.stage='finished';}return result;}catch(e){this.status.state='error';this.status.error=String(e.message).slice(0,300);throw e;}finally{this.running=false;await this.persist();await unlink(lock);}
  }
  async review(attemptId){
   if(this.running)throw Error('Wait for the current worker operation');

@@ -1,9 +1,31 @@
+import {seedQuality} from './helpers/quality-fixture.js';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';
 import path from 'node:path';import os from 'node:os';
 import {ApplicationStore,digest,prepareApplications,runApplications,postingKey,salaryForLocation,fillPlan,dayAt,configureStandingAuthorization,answerFor} from '../src/applications.js';
 const now=()=>new Date('2026-11-09T18:00:00Z');
+test('native callers cannot bypass quality with the legacy compatibility flag',async()=>{
+ const f=await fixture();try{await f.authorize();f.adapter.transport='playwright';const p=await f.store.read('application-policy.json');await f.store.write('application-policy.json',{...p,requireQualityReview:false});await f.store.write('career-evidence.json',{sources:[],facts:[],caseStudies:[]});assert.equal((await f.run())[0].status,'quality_held');assert.deepEqual(f.events,[]);}finally{await f.close();}
+});
+test('manual mode blocks direct engine submission even with an approved packet',async()=>{
+ const f=await fixture();try{await f.authorize();const p=await f.store.read('application-policy.json');await f.store.write('application-policy.json',{...p,submissionMode:'manual'});assert.equal((await f.run())[0].status,'review_only');assert.deepEqual(f.events,[]);assert.deepEqual(await f.store.read('application-ledger.json',[]),[]);}finally{await f.close();}
+});
+test('native automatic execution needs risk acknowledgement and source-backed quality review',async()=>{
+ const f=await fixture();try{f.adapter.transport='playwright';await f.authorize();let p=await f.store.read('application-policy.json');await f.store.write('application-policy.json',{...p,submissionMode:'automatic',automationRiskAcknowledged:false});assert.equal((await f.run())[0].status,'automation_risk_unacknowledged');assert.deepEqual(f.events,[]);p=await f.store.read('application-policy.json');await f.store.write('career-evidence.json',{sources:[],facts:[],caseStudies:[]});await f.store.write('application-policy.json',{...p,automationRiskAcknowledged:true,requireQualityReview:true});assert.equal((await f.run())[0].status,'quality_held');assert.deepEqual(f.events,[]);}finally{await f.close();}
+});
+test('automatic quality gates pin evidence and the selected track PDF through final submission',async()=>{
+ const {loadEvidence,jobDigest}=await import('../src/quality.js'),{registerTrackResume}=await import('../src/packets.js');
+ for(const mutation of ['none','source-before','source-during','wrong-track']){const f=await fixture();try{
+  f.adapter.transport='playwright';const text='Owned product roadmaps and delivery.';await writeFile(path.join(f.root,'evidence.txt'),text);await f.store.write('career-evidence.json',{sources:[{id:'s',path:'evidence.txt',sha256:digest(text)}],facts:[{id:'f',text,quote:text,sourceId:'s',verified:true,tracks:['product'],capabilities:[]}],caseStudies:[{id:'case',tracks:['product'],evidenceIds:['f'],url:'https://example.invalid/case'}]});
+  await f.store.write('resume-registry.json',{variants:{}});await registerTrackResume({home:f.root,track:mutation==='wrong-track'?'design':'product',file:path.join(f.root,'resume.pdf'),confirm:'reviewed'});const e=await loadEvidence(f.root);await f.store.write('quality-reviews.json',{[f.job.id]:{jobDigest:jobDigest(f.job),evidenceDigest:e.digest,resumeSha256:digest(await readFile(path.join(f.root,'resume.pdf'))),allMandatoryReviewed:true,reviewer:'Synthetic applicant review',reviewedAt:new Date().toISOString(),requirements:[{text:'Product ownership',status:'supported',evidenceIds:['f']}]}});
+  const p=await f.store.read('application-policy.json');await f.store.write('application-policy.json',{...p,requireQualityReview:true});
+  if(mutation==='wrong-track'){assert.equal((await f.prepare()).packets.length,0);assert.deepEqual(f.events,[]);continue;}
+  await f.authorize();if(mutation==='source-before')await writeFile(path.join(f.root,'evidence.txt'),'Changed');
+  if(mutation==='source-during'){const fill=f.adapter.fill;f.adapter.fill=async(...a)=>{await fill(...a);await writeFile(path.join(f.root,'evidence.txt'),'Changed');};}
+  const result=await f.run();assert.equal(result[0].status,mutation==='none'?'submitted':mutation==='source-before'?'quality_held':'held');assert.equal(f.events.includes('submit'),mutation==='none');
+ }finally{await f.close();}}
+});
 test('explicit uncertain-restart exception preserves the original and permits only one fresh native attempt',async()=>{
  const {authorizeUnknownRestart}=await import('../src/applications.js');assert.equal(typeof authorizeUnknownRestart,'function');
  const f=await fixture();try{
@@ -49,8 +71,8 @@ async function fixture(){
  await store.write('search.json',{titleLevels:['director'],titleFields:['product'],localCities:[],remoteCountry:'United States',minAnnualBaseUsd:190000,excludeEmployers:[]});
  await store.write('connections.json',{resume});await store.write('application-profile.json',profile);
  const approval=path.join(root,'resume-approval.json');await writeFile(approval,JSON.stringify({approved:true,path:resume,sha256:digest(pdf)}));
- await store.write('application-policy.json',{enabled:true,maxPerDay:15,dailyBudgetUsd:1,timezone:'America/Chicago',resumeApprovalPath:approval,verifiedProfileSha256:digest(profile)});
- await store.write('jobs.json',[job]);await store.write('history.json',[]);
+ await store.write('application-policy.json',{enabled:true,submissionMode:'automatic',automationRiskAcknowledged:true,requireQualityReview:false,maxPerDay:15,dailyBudgetUsd:1,timezone:'America/Chicago',resumeApprovalPath:approval,verifiedProfileSha256:digest(profile)});
+ await store.write('jobs.json',[job]);await store.write('history.json',[]);await seedQuality(root,job,resume);
  const form={fields:[{id:'first',label:'First Name',type:'text',required:true,value:''},{id:'email',label:'Email',type:'text',required:true,value:''}],resume:{id:'resume',label:'Resume'},submit:{label:'Submit application'}};
  const events=[];
  const adapter={estimatedCostUsd:0,inspect:async(j)=>({job:j,tabId:'fixture-tab',titleVerified:true,closed:false,login:false,location:'Remote, United States',description:'Annual base salary $200,000 - $250,000 USD per year',form:structuredClone(form)}),fill:async()=>events.push('fill'),verify:async()=>({ok:true}),submit:async()=>{assert.equal((await store.read('application-ledger.json',[]))[0].status,'submission_unknown');events.push('submit')},confirm:async()=>({confirmed:true,posting:job.url,text:'Your application has been received'})};
@@ -83,7 +105,7 @@ test('plan is read-only; only explicit packet authorization enables fill and sub
 });
 test('standing search authorization submits natively without inventing per-job approval and cannot authorize the Codex adapter',async()=>{
  const f=await fixture();try{await f.prepare();await configureStandingAuthorization({home:f.root,evidence:'Applicant explicitly enabled automatic matching applications',now});
- assert.equal((await f.run())[0].status,'authorization_required');f.adapter.transport='playwright';
+ assert.equal((await f.run())[0].status,'authorization_required');f.adapter.transport='playwright';await f.prepare();
  const result=await f.run();assert.equal(result[0].status,'submitted');assert.equal(result[0].authorization.mode,'search-rules');assert.deepEqual(await f.store.read('application-approvals.json',[]),[]);
  }finally{await f.close();}
 });
@@ -265,7 +287,7 @@ test('complete verified employment history supports named prior-employer checks 
 });
 
 test('a scoped substantive IC review enables only its unchanged role and applicant scope in the native worker',async()=>{
- const f=await fixture(),reviewNow=()=>new Date(),prepare=()=>prepareApplications({home:f.root,adapter:f.adapter,now:reviewNow});try{const job={...f.job,title:'Staff Product Designer',description:'Complex enterprise workflow design'};await f.store.write('jobs.json',[job]);const search=await f.store.read('search.json');await f.store.write('search.json',{...search,titleLevels:['staff'],titleFields:['product']});f.adapter.transport='playwright';await configureStandingAuthorization({home:f.root,evidence:'Applicant selected staff design and native automatic submissions',now:reviewNow});assert.equal((await prepare()).packets.length,0);
+ const f=await fixture(),reviewNow=()=>new Date(),prepare=()=>prepareApplications({home:f.root,adapter:f.adapter,now:reviewNow});try{const job={...f.job,title:'Staff Product Designer',description:'Complex enterprise workflow design'};await f.store.write('jobs.json',[job]);await seedQuality(f.root,job,path.join(f.root,'resume.pdf'));const search=await f.store.read('search.json');await f.store.write('search.json',{...search,titleLevels:['staff'],titleFields:['product']});f.adapter.transport='playwright';await configureStandingAuthorization({home:f.root,evidence:'Applicant selected staff design and native automatic submissions',now:reviewNow});assert.equal((await prepare()).packets.length,0);
  let policy=await f.store.read('application-policy.json'),g=policy.standingAuthorization;policy.individualContributorReviews=[{jobId:job.id,postingKey:postingKey(job.url),jobSha256:digest({title:job.title,location:job.location,description:job.description}),resumeSha256:g.resumeSha256,profileSha256:g.profileSha256,searchSha256:g.searchSha256,reviewedAt:reviewNow().toISOString(),evidence:'Reviewed enterprise design qualifications against verified applicant history; no specialist engineering qualification inferred.'}];await f.store.write('application-policy.json',policy);
  assert.equal((await prepare()).packets.length,1);await f.store.write('jobs.json',[{...job,description:'Changed specialist requirements'}]);assert.equal((await prepare()).packets.length,0);await f.store.write('jobs.json',[job]);const {MosaicWorker}=await import('../src/worker.js');await new MosaicWorker({home:f.root,adapterFactory:async()=>f.adapter}).cycle({discover:false});assert.deepEqual(f.events,['fill','submit']);
  }finally{await f.close();}

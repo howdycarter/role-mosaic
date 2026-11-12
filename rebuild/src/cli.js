@@ -6,10 +6,15 @@ import { evaluate, mergeJobs, historyMatch } from './core.js';
 import { initialize, connectNotion, attachResume, options } from './onboarding.js';
 import { importCareer, renderCareer } from './career.js';
 import { approveResume, configureApplications } from './applications.js';
+import {prepareQualityPackets,registerTrackResume,initializeQuality,recordRoleReview} from './packets.js';
 const [cmd='help',...args] = process.argv.slice(2);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function main() {
- if(cmd==='init') {
+ if(cmd==='quality-init') {console.log(JSON.stringify(await initializeQuality(home)));
+ } else if(cmd==='register-resume') {const o=options(args,['track','file','confirm']);console.log(JSON.stringify(await registerTrackResume({home,...o})));
+ } else if(cmd==='review-role') {const o=options(args,['job','file','confirm','reviewer']);console.log(JSON.stringify(await recordRoleReview({home,jobId:o.job,file:o.file,confirm:o.confirm,reviewer:o.reviewer})));
+ } else if(cmd==='prepare-packets') {const o=options(args,['job','limit']);const r=await prepareQualityPackets({home,jobIds:o.job?[o.job]:undefined,limit:Number(o.limit||15)});console.log(JSON.stringify({mode:r.submissionMode,prepared:r.packets.length,ready:r.packets.filter(p=>p.quality.ready).length,directory:path.join(home,'packets'),issues:r.evidenceIssues}));
+ } else if(cmd==='init') {
   const result=await initialize(options(args,['resume','career','search','boards','profile']));
   console.log(`Applicant workspace created at ${result.home}. ${result.boards} boards configured. Review search.json and career-review.html in that workspace before discovery. No AI calls or applications were made.`);
  } else if(cmd==='approve-resume') {
@@ -69,6 +74,6 @@ async function main() {
   const jobs=await read('jobs.json',[]), matches=jobs.filter(j=>j.id.startsWith(id||''));
   if(!id||matches.length!==1) throw Error('Provide a unique job ID prefix');
   matches[0].status=status; if(note.length) matches[0].note=note.join(' '); matches[0].updatedAt=new Date().toISOString(); await write('jobs.json',jobs); console.log(`Updated ${id} to ${status}.`);
- } else console.log('RoleMosaic rebuild: init [--resume PDF | --career FILE] [--search FILE] [--boards FILE] [--profile FILE], import-career --file FILE [--label NAME], career-review, approve-resume --confirm reviewed, configure-applications --profile FILE --confirm reviewed, attach-resume --file PDF, connect-notion --file FILE --url URL, import-legacy [path], discover, report, list, mark ID STATUS [NOTE], applications, status');
+ } else console.log('RoleMosaic rebuild: quality-init, review-role --job ID --file REVIEW_JSON --reviewer NAME --confirm reviewed, register-resume --track product|design|engineering --file PDF [--confirm reviewed], prepare-packets [--job ID] [--limit 15], init [--resume PDF | --career FILE] [--search FILE] [--boards FILE] [--profile FILE], import-career --file FILE [--label NAME], career-review, approve-resume --confirm reviewed, configure-applications --profile FILE --confirm reviewed, attach-resume --file PDF, connect-notion --file FILE --url URL, import-legacy [path], discover, report, list, mark ID STATUS [NOTE], applications, status');
 }
 main().catch(e=>{console.error(`Error: ${e.message}`); process.exitCode=1;});

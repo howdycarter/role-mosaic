@@ -1,0 +1,45 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {mkdtemp,writeFile,readFile,rm} from 'node:fs/promises';import os from 'node:os';import path from 'node:path';import {createHash} from 'node:crypto';
+const hash=s=>createHash('sha256').update(s).digest('hex');
+test('offline packets use only pinned evidence and the correct draft track without external transmission',async()=>{
+ const {prepareQualityPackets,registerTrackResume}=await import('../src/packets.js');const home=await mkdtemp(path.join(os.tmpdir(),'mosaic-packets-'));
+ try{const source='Led a design team. <script>untrusted()</script>';await writeFile(path.join(home,'source.txt'),source);await writeFile(path.join(home,'own.pdf'),'%PDF-1.4 synthetic');
+ await writeFile(path.join(home,'career-evidence.json'),JSON.stringify({sources:[{id:'source',path:'source.txt',sha256:hash(source)}],facts:[{id:'proof',verified:true,text:source,quote:source,sourceId:'source',tracks:['design'],capabilities:['design-leadership']}],caseStudies:[]}));await writeFile(path.join(home,'search.json'),JSON.stringify({titleLevels:['director'],titleFields:['design'],localCities:[],minAnnualBaseUsd:190000}));await writeFile(path.join(home,'jobs.json'),JSON.stringify([{id:'j',company:'Example',title:'Director of Product Design',location:'Remote US',url:'https://example.invalid/job',description:'Lead design teams'}]));
+ await registerTrackResume({home,track:'product',file:path.join(home,'own.pdf')});let p=await prepareQualityPackets({home,jobIds:['j']});assert.equal(p.packets[0].quality.resume.status,'missing');
+ await registerTrackResume({home,track:'design',file:path.join(home,'own.pdf')});p=await prepareQualityPackets({home,jobIds:['j']});assert.equal(p.packets[0].quality.resume.status,'draft');assert.equal(p.packets[0].quality.ready,false);assert.equal(p.packets[0].submissionMode,'manual');
+ const html=await readFile(path.join(home,'packets',p.packets[0].id+'.html'),'utf8');assert.ok(html.includes('&lt;script&gt;untrusted()&lt;/script&gt;'));assert.equal(html.includes('<script>untrusted()'),false);assert.ok(html.includes("default-src 'none'"));await assert.rejects(readFile(path.join(home,'application-ledger.json')),{code:'ENOENT'});
+ }finally{await rm(home,{recursive:true,force:true})}
+});
+test('track approval pins exact PDF bytes and is never inferred from attachment',async()=>{
+ const {registerTrackResume}=await import('../src/packets.js'),{selectTrackResume}=await import('../src/quality.js');const home=await mkdtemp(path.join(os.tmpdir(),'mosaic-variant-'));
+ try{await writeFile(path.join(home,'own.pdf'),'%PDF-1.4 synthetic');await registerTrackResume({home,track:'engineering',file:path.join(home,'own.pdf')});assert.equal((await selectTrackResume(home,'engineering')).status,'draft');await registerTrackResume({home,track:'engineering',file:path.join(home,'own.pdf'),confirm:'reviewed'});let r=await selectTrackResume(home,'engineering');assert.equal(r.status,'approved');await writeFile(r.path,'%PDF-1.4 changed');assert.equal((await selectTrackResume(home,'engineering')).status,'changed');await assert.rejects(registerTrackResume({home,track:'sales',file:path.join(home,'own.pdf')}));}finally{await rm(home,{recursive:true,force:true})}
+});
+test('a role review pins current evidence and PDF while unknown requirements remain held',async()=>{
+ const {recordRoleReview}=await import('../src/packets.js');assert.equal(typeof recordRoleReview,'function');const home=await mkdtemp(path.join(os.tmpdir(),'mosaic-role-review-'));
+ try{await writeFile(path.join(home,'jobs.json'),JSON.stringify([{id:'role',title:'Director of Product',url:'https://example.invalid/job',location:'Remote US',description:'Product leadership'}]));await writeFile(path.join(home,'review.json'),JSON.stringify({requirements:[{text:'Product leadership experience',status:'unknown',evidenceIds:[]}]}));const result=await recordRoleReview({home,jobId:'role',file:path.join(home,'review.json'),confirm:'reviewed',reviewer:'Applicant'});assert.equal(result.ready,false);const saved=JSON.parse(await readFile(path.join(home,'quality-reviews.json'),'utf8'));assert.equal(saved.role.reviewer,'Applicant');assert.equal(saved.role.requirements[0].status,'unknown');}finally{await rm(home,{recursive:true,force:true})}
+});
+test('saved packets become stale when source evidence changes and hide invalidated proof points',async()=>{
+ const {prepareQualityPackets,refreshPacket}=await import('../src/packets.js');assert.equal(typeof refreshPacket,'function');const home=await mkdtemp(path.join(os.tmpdir(),'mosaic-stale-packet-'));
+ try{const quote='Owned product delivery';await writeFile(path.join(home,'source.txt'),quote);await writeFile(path.join(home,'career-evidence.json'),JSON.stringify({sources:[{id:'s',path:'source.txt',sha256:hash(quote)}],facts:[{id:'f',text:quote,quote,sourceId:'s',verified:true,tracks:['product'],capabilities:[]}],caseStudies:[]}));await writeFile(path.join(home,'jobs.json'),JSON.stringify([{id:'r',company:'Example',title:'Director Product',description:'Product delivery',location:'Remote US',url:'https://example.invalid/job'}]));const p=(await prepareQualityPackets({home,jobIds:['r']})).packets[0];await writeFile(path.join(home,'source.txt'),'Changed');const live=await refreshPacket(home,p);assert.equal(live.stale,true);assert.equal(live.quality.ready,false);assert.equal(live.proofPoints.length,0);assert.ok(live.quality.reasons.some(s=>/regenerate/i.test(s)));}finally{await rm(home,{recursive:true,force:true})}
+});
+test('ready packets are invalidated by review expiry, posting, salary rule, PDF or application-state changes',async()=>{
+ const {prepareQualityPackets,refreshPacket}=await import('../src/packets.js'),{seedQuality}=await import('./helpers/quality-fixture.js'),{ApplicationStore}=await import('../src/applications.js');
+ for(const mutation of ['expiry','posting','rules','pdf','attempt','tamper']){const home=await mkdtemp(path.join(os.tmpdir(),'mosaic-packet-drift-')),store=new ApplicationStore(home);try{
+ const job={id:'r',company:'Example',title:'Director Product',description:'Product delivery',location:'Remote US',url:'https://example.invalid/job',compensation:{min:210000,max:250000,currency:'USD',interval:'year'}};
+ await store.write('jobs.json',[job]);await store.write('search.json',{titleLevels:['director'],titleFields:['product'],localCities:[],minAnnualBaseUsd:190000});await writeFile(path.join(home,'own.pdf'),'%PDF-1.4 synthetic');await seedQuality(home,job,path.join(home,'own.pdf'));
+ const p=(await prepareQualityPackets({home,jobIds:['r']})).packets[0];assert.equal(p.quality.ready,true);assert.equal((await refreshPacket(home,p)).stale,false);
+ if(mutation==='expiry'){const r=await store.read('quality-reviews.json');r.r.reviewedAt='2000-01-01T00:00:00Z';await store.write('quality-reviews.json',r);}
+ if(mutation==='posting')await store.write('jobs.json',[{...job,description:'New mandatory requirements'}]);
+ if(mutation==='rules')await store.write('search.json',{titleLevels:['director'],titleFields:['product'],localCities:[],minAnnualBaseUsd:300000});
+ if(mutation==='pdf')await writeFile(p.quality.resume.path,'%PDF-1.4 changed');
+ if(mutation==='attempt')await store.write('application-ledger.json',[{jobId:'r',status:'submission_unknown'}]);
+ if(mutation==='tamper')p.proofPoints[0].text='Tampered claim';
+ const live=await refreshPacket(home,p);assert.equal(live.stale,true,mutation);assert.equal(live.quality.ready,false,mutation);
+ }finally{await rm(home,{recursive:true,force:true})}}
+});
+test('discovery shortlist prioritizes evidenced leadership tracks and diversifies employers',async()=>{
+ const {prepareQualityPackets}=await import('../src/packets.js'),{seedQuality}=await import('./helpers/quality-fixture.js'),{ApplicationStore}=await import('../src/applications.js');const home=await mkdtemp(path.join(os.tmpdir(),'mosaic-shortlist-')),store=new ApplicationStore(home);
+ try{const base={title:'Director Product',description:'Product delivery',location:'Remote US',url:'https://example.invalid/job',compensation:{min:210000,max:250000,currency:'USD',interval:'year'}},jobs=[...Array.from({length:6},(_,i)=>({...base,id:'bulk'+i,company:'Bulk',title:'Staff Engineer',url:base.url+i})),...Array.from({length:3},(_,i)=>({...base,id:'lead'+i,company:'Leader',url:base.url+'lead'+i})),{...base,id:'other',company:'Other',url:base.url+'other'}];
+ await store.write('jobs.json',jobs);await store.write('search.json',{titleLevels:['director','staff'],titleFields:['product','engineer'],localCities:[],minAnnualBaseUsd:190000});await writeFile(path.join(home,'own.pdf'),'%PDF-1.4 synthetic');await seedQuality(home,jobs[6],path.join(home,'own.pdf'));const evidence=await store.read('career-evidence.json');evidence.caseStudies[0].tracks=['product'];await store.write('career-evidence.json',evidence);
+ const result=await prepareQualityPackets({home,limit:3});assert.deepEqual(result.packets.map(p=>p.job.company),['Leader','Leader','Other']);
+ }finally{await rm(home,{recursive:true,force:true})}
+});

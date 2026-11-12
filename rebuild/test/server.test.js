@@ -8,7 +8,15 @@ test('local app serves state and refuses unauthorized writes',async()=>{
  const child=spawn(process.execPath,[new URL('../src/server.js',import.meta.url).pathname],{env:{...process.env,ROLEMOSAIC_HOME:dir,PORT:'0'}});
  try{
   const url=await new Promise((resolve,reject)=>{child.stdout.on('data',b=>{const m=String(b).match(/http:\/\/127.0.0.1:\d+/);if(m)resolve(m[0])});child.on('error',reject);child.on('exit',()=>reject(Error('Server exited')))});
-  const state=await fetch(url+'/api/state');assert.equal(state.status,200);assert.deepEqual((await state.json()).jobs,[]);
+  const state=await fetch(url+'/api/state');assert.equal(state.status,200);const data=await state.json();assert.deepEqual(data.jobs,[]);assert.equal(data.submissionMode,'manual');
+  assert.equal((await fetch(url+'/api/packet?id=../application-policy')).status,400);
+  const html=await(await fetch(url)).text(),token=html.match(/const token='([^']+)'/)[1],headers={'Content-Type':'application/json','Origin':url,'X-Rolemosaic-Token':token};
+  const prepared=await fetch(url+'/api/prepare-packets',{method:'POST',headers,body:'{}'});assert.equal(prepared.status,200);assert.equal((await prepared.json()).submissionMode,'manual');
+  assert.equal((await fetch(url+'/api/submission-mode',{method:'POST',headers,body:JSON.stringify({mode:'automatic'})})).status,400);
+
+  const {ApplicationStore}=await import('../src/applications.js'),{seedQuality}=await import('./helpers/quality-fixture.js'),{prepareQualityPackets}=await import('../src/packets.js'),store=new ApplicationStore(dir),job={id:'r',company:'Example',title:'Director Product',description:'Product delivery',location:'Remote US',url:'https://example.invalid/job',compensation:{min:210000,max:250000,currency:'USD',interval:'year'}};
+  await store.write('jobs.json',[job]);await store.write('search.json',{titleLevels:['director'],titleFields:['product'],localCities:[],minAnnualBaseUsd:190000});await writeFile(path.join(dir,'own.pdf'),'%PDF-1.4 synthetic');await seedQuality(dir,job,path.join(dir,'own.pdf'));const packet=(await prepareQualityPackets({home:dir,jobIds:['r']})).packets[0];assert.equal((await(await fetch(url+'/api/state')).json()).qualityPackets[0].ready,true);
+  await writeFile(path.join(dir,'synthetic-evidence.txt'),'Source changed');const changed=await(await fetch(url+'/api/state')).json();assert.equal(changed.qualityPackets[0].ready,false);assert.equal(changed.qualityPackets[0].proofCount,0);const staleHtml=await(await fetch(url+'/api/packet?id='+packet.id)).text();assert.match(staleHtml,/Stale — regenerate/);assert.equal(staleHtml.includes('Synthetic product, design and engineering delivery example.'),false);
   const page=await fetch(url);assert.ok((await page.text()).includes('Career history'));
   assert.equal((await fetch(url+'/api/status',{method:'POST',body:'{}'})).status,403);
  }finally{child.kill();await rm(dir,{recursive:true,force:true})}

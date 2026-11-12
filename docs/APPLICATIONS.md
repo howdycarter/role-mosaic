@@ -1,5 +1,7 @@
 # Browser-driven applications
 
+**Default behavior changed:** use [evidence-led preparation](APPLICATION_QUALITY.md) for manual final submission. The browser-engine APIs below are an experimental automatic path; they require `submissionMode: "automatic"`, explicit native automation-risk acknowledgement and the current source/track-PDF quality gate. Missing mode defaults to manual and blocks filling/submission, including direct engine calls. Configuring application facts alone does not opt into automatic mode.
+
 Mosaic can prepare, fill, submit and verify **supported one-page applications using its own local Playwright worker**. Codex Browser remains an optional adapter; the standalone worker does not require it. This is a serial, guarded workflow, not a universal ATS adapter. Greenhouse, Ashby and Lever hosted posting URLs are eligible for inspection; each actual form must expose supported controls. Custom sites, Workday, sign-in, account creation, CAPTCHA, unsupported widgets and unknown required answers are held for review. See [standalone setup](STANDALONE.md) for dashboard controls, scheduling and direct Notion sync.
 
 Discovery/import work without API keys. The standalone worker uses the rebuild's Playwright dependency and installed Chrome or Chromium. Both browser adapters make no JEV/OpenRouter calls and estimate $0 provider cost. Other adapters must declare a cost estimate; the engine reserves that estimate against the configured daily budget. It cannot account for unrelated tools or account spending outside Mosaic.

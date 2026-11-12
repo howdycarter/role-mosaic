@@ -1,0 +1,19 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {mkdtemp,writeFile,rm} from 'node:fs/promises';import os from 'node:os';import path from 'node:path';import {createHash} from 'node:crypto';
+const hash=s=>createHash('sha256').update(s).digest('hex');
+test('specialized search leadership cannot be established by generic AI or people leadership',async()=>{
+ const {assessQuality,roleTrack}=await import('../src/quality.js');assert.equal(typeof assessQuality,'function');
+ const job={id:'search',title:'Director of Product, Search',description:'Who you are\nYou have built search and relevance systems at scale with deep ranking, retrieval and query understanding expertise.',url:'https://example.invalid/jobs/search',location:'Remote US'};
+ const q=assessQuality(job,{digest:'evidence',facts:[{id:'ai',text:'Led AI prototypes',tracks:['product'],capabilities:['ai-product','people-leadership']}],caseStudies:[]},{resume:{status:'approved',sha256:'pdf',track:'product'}});
+ assert.equal(q.ready,false);assert.ok(q.missingRequirements.some(r=>r.id==='search-systems'));assert.equal(roleTrack('Director, People Partners - Product, Design & Engineering'),null);assert.equal(roleTrack('Director, Product Legal'),null);assert.equal(roleTrack('Director of Product Design'),'design');
+});
+test('preferred domain experience stays optional and job reviews expire when the posting changes',async()=>{
+ const {assessQuality,jobDigest}=await import('../src/quality.js');assert.equal(typeof jobDigest,'function');
+ const job={id:'design',title:'Director of Product Design',description:'Requirements\nExperience leading design teams.\nNice to have\nExperience with search ranking and retrieval systems.',url:'https://example.invalid/design',location:'Remote US'},resume={status:'approved',track:'design',sha256:'pdf'},e={digest:'evidence',facts:[{id:'team',text:'Led design teams',tracks:['design'],capabilities:['design-leadership']}],caseStudies:[{id:'case',tracks:['design'],evidenceIds:['team'],url:'https://example.invalid/case'}]};
+ const review={jobDigest:jobDigest(job),evidenceDigest:e.digest,resumeSha256:resume.sha256,allMandatoryReviewed:true,reviewedAt:new Date().toISOString(),reviewer:'Applicant review',requirements:[{text:'Experience leading design teams',status:'supported',evidenceIds:['team']} ]};
+ assert.equal(assessQuality(job,e,{resume,review}).ready,true);assert.equal(assessQuality({...job,description:job.description+'\nNew required qualification'},e,{resume,review}).ready,false);
+ assert.equal(assessQuality(job,e,{resume:{...resume,track:'product'},review}).ready,false);
+});
+test('evidence requires exact verified source quotes and detects changed sources',async()=>{
+ const {loadEvidence}=await import('../src/quality.js');assert.equal(typeof loadEvidence,'function');const home=await mkdtemp(path.join(os.tmpdir(),'mosaic-proof-'));
+ try{await writeFile(path.join(home,'source.txt'),'Managed 20 people across engineering, design and analytics.');const p={sources:[{id:'source',path:'source.txt',sha256:hash('Managed 20 people across engineering, design and analytics.')}],facts:[{id:'team',verified:true,sourceId:'source',text:'Managed 20 people across engineering, design and analytics.',quote:'Managed 20 people across engineering, design and analytics.',tracks:['product'],capabilities:['people-leadership']},{id:'fake',verified:true,sourceId:'source',quote:'Managed 20 people',text:'Doubled revenue',tracks:['product'],capabilities:['revenue']}],caseStudies:[]};await writeFile(path.join(home,'career-evidence.json'),JSON.stringify(p));let e=await loadEvidence(home);assert.deepEqual(e.facts.map(f=>f.id),['team']);assert.ok(e.issues.length);await writeFile(path.join(home,'source.txt'),'Changed');e=await loadEvidence(home);assert.equal(e.facts.length,0);assert.ok(e.issues.some(s=>/changed|hash/i.test(s)));}finally{await rm(home,{recursive:true,force:true})}
+});

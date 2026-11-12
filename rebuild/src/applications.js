@@ -3,9 +3,20 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { evaluate, canonical, historyMatch, reapplicationHistory } from './core.js';
 import { optionForAnswer, sameAnswer } from './application-values.js';
+import {inspectQuality,qualityDigest,jobDigest} from './quality.js';
 export { optionForAnswer, sameAnswer } from './application-values.js';
 
 export const digest = value => createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');
+export function submissionHold(policy,adapter){if(policy.submissionMode!=='automatic')return 'review_only';if(adapter?.transport==='playwright'&&policy.automationRiskAcknowledged!==true)return 'automation_risk_unacknowledged';return null;}
+async function qualityGate(store,ctx,job,packet,adapter){
+ if(ctx.policy.requireQualityReview===false&&adapter?.transport!=='playwright')return {ok:true};
+ const {assessment}=await inspectQuality(store.root,job),qualitySha256=qualityDigest(assessment);
+ const live=(await store.read('jobs.json',[])).find(j=>j.id===job.id);
+ const reasons=[...assessment.reasons];if(assessment.resume.sha256!==ctx.resumeSha256)reasons.push('Active approved PDF does not match the reviewed résumé for this track');
+ if(live&&jobDigest(live)!==jobDigest(job))reasons.push('Posting changed since packet preparation');
+ if(packet&&packet.qualitySha256!==qualitySha256)reasons.push('Evidence, résumé or role review changed since preparation');
+ return {ok:assessment.ready&&reasons.length===0,reasons,qualitySha256};
+}
 export function individualContributorReviewed(job,policy,at=new Date()) {
  const grant=policy.standingAuthorization;
  if(policy.authorizationMode!=='search-rules'||!grant?.enabled)return false;
@@ -200,6 +211,7 @@ function packetFromInspection(job,inspection,ctx,at) {
 /** Inspect only: no contact fields, uploads or final buttons are touched. */
 export async function prepareApplications({home,adapter,limit=15,jobIds,restartAuthorizationId,now=()=>new Date()}) {
  const store=new ApplicationStore(home),ctx=await prerequisites(store,now()),jobs=await store.read('jobs.json',[]),attempts=await store.read('application-ledger.json',[]);
+ const hold=submissionHold(ctx.policy,adapter);if(hold)return {createdAt:now().toISOString(),packets:[],held:[{reason:hold==='review_only'?'Manual final submission: prepare local evidence packets instead':'Browser automation risk must be explicitly acknowledged'}]};
  const packets=[],held=[];
  for(const job of jobs){
   if(jobIds&&!jobIds.includes(job.id))continue;
@@ -207,6 +219,7 @@ export async function prepareApplications({home,adapter,limit=15,jobIds,restartA
   const restart=await restartException(store,restartAuthorizationId,job,ctx,attempts,adapter,now());
   if(restartAuthorizationId&&!restart)continue;
   if(!supportedPosting(job.url)||!restart&&duplicate(job,ctx.history,attempts,ctx.reapplicationReviews)||['applied','dismissed','rejected'].includes(job.status))continue;
+  const quality=await qualityGate(store,ctx,job,undefined,adapter);if(!quality.ok){held.push({id:job.id,company:job.company,title:job.title,reason:'Application quality review required',questions:quality.reasons});continue;}
   const preliminary=evaluate({...job,compensation:job.compensation||{min:ctx.search.minAnnualBaseUsd,currency:'USD',interval:'year'}},ctx.search);
   if(preliminary.reasons.some(r=>!['Annual USD base compensation needs verification','Location needs review'].includes(r)))continue;
   if(!/director|vice president|\bvp\b|head|chief/i.test(job.title)&&ctx.policy.requireICReview!==false&&!individualContributorReviewed(job,ctx.policy,now())){held.push({id:job.id,company:job.company,title:job.title,reason:'Individual-contributor specialization requires review'});continue;}
@@ -219,6 +232,7 @@ export async function prepareApplications({home,adapter,limit=15,jobIds,restartA
   if(plan.missing.length){held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Missing verified answers or supported controls',questions:plan.missing});continue;}
   const packet={id:randomUUID(),job,tabId:inspection.tabId,createdAt:now().toISOString(),expiresAt:new Date(now().getTime()+60*60*1000).toISOString(),resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,searchSha256:ctx.searchSha256,formDigest:formDigest(inspection.form),salary:pay,location:inspection.location,fields:plan.actions.map(a=>a.field.label),answersPreview:plan.actions.map(a=>({question:a.field.label,answer:a.value})),resumeFilename:path.basename(ctx.connections.resume)};
   if(restart)packet.restartAuthorizationId=restart.id;
+  if(quality.qualitySha256)packet.qualitySha256=quality.qualitySha256;
   packet.digest=digest(packet);packets.push(packet);
  }
  const result={createdAt:now().toISOString(),packets,held};await store.write('application-plan.json',result);return result;
@@ -227,6 +241,7 @@ export async function prepareApplications({home,adapter,limit=15,jobIds,restartA
 export async function runApplications({home,adapter,now=()=>new Date(),limit=15,resumeAttemptId,packetIds,shouldContinue=()=>true}) {
  const store=new ApplicationStore(home);
  return store.lock(async()=>{
+  const modeHold=submissionHold(await store.read('application-policy.json',{}),adapter);if(modeHold)return [{status:modeHold}];
   const plan=await store.read('application-plan.json',null),approvals=await store.read('application-approvals.json',[]);
   if(!plan)throw Error('Prepare an application plan before running');
   // Only a pre-submit hold can be refreshed after a browser/service restart.
@@ -240,6 +255,7 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
    const restart=job&&await restartException(store,held.restartAuthorizationId,job,ctx,ledger,adapter,now(),held.id);
    if(!job||held.restartAuthorizationId&&!restart||['applied','dismissed','rejected'].includes(job.status)||!restart&&duplicate(job,ctx.history,ledger.filter(a=>a.id!==held.id),ctx.reapplicationReviews))throw Error('Held draft is no longer eligible');
    const inspection=await adapter.inspect(job),fresh=packetFromInspection(job,inspection,ctx,now());
+   const freshQuality=await qualityGate(store,ctx,job,undefined,adapter);if(!freshQuality.ok)throw Error('Held draft needs evidence and track résumé review');if(freshQuality.qualitySha256){fresh.qualitySha256=freshQuality.qualitySha256;fresh.digest=digest(Object.fromEntries(Object.entries(fresh).filter(([k])=>k!=='digest')));}
    if(restart){fresh.restartAuthorizationId=restart.id;fresh.digest=digest(Object.fromEntries(Object.entries(fresh).filter(([k])=>k!=='digest')));}
    (held.draftRefreshes||=[]).push({at:now().toISOString(),previousPacketDigest:held.packetDigest,previousTabId:held.tabId,packetDigest:fresh.digest,grantId:ctx.policy.standingAuthorization.id});
    if(held.tabId!==fresh.tabId)held.browserEvidence=null;
@@ -263,6 +279,7 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
    if(!Number.isFinite(cost)||cost<0||today.reduce((n,a)=>n+(a.reservedCostUsd||0),0)+cost>ctx.policy.dailyBudgetUsd){results.push({status:'budget_limit'});break;}
    const authorization=applicationAuthorization(ctx.policy,packet,adapter,approvals,at);
    if(!authorization){results.push({jobId:packet.job.id,status:'authorization_required'});continue;}
+   const quality=await qualityGate(store,ctx,packet.job,packet,adapter);if(!quality.ok){results.push({jobId:packet.job.id,status:'quality_held',reasons:quality.reasons});continue;}
    if(resumed?.browserEvidence)adapter.restoreEvidence?.(packet.job.id,resumed.browserEvidence);
    const inspection=await adapter.inspect(packet.job,{tabId:packet.tabId});
    const fit=evaluate({...packet.job,location:inspection.location,compensation:inspectionSalary(inspection,ctx.profile.facts.stateCode)},ctx.search),actions=fillPlan(inspection.form,ctx.profile,{postingKey:key,company:packet.job.company});
@@ -286,6 +303,7 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
     if(!check.ok||check.captcha||check.manual){attempt.status='held';attempt.reason=check.reason||'Readback, CAPTCHA or manual action required';await save();results.push({...attempt});continue;}
     if(!await shouldContinue()){attempt.status='held';attempt.reason='Worker paused before submission';await save();results.push({...attempt});continue;}
     const current=await prerequisites(store,now());
+    if(submissionHold(current.policy,adapter)||!(await qualityGate(store,current,packet.job,packet,adapter)).ok)throw Error('Submission mode or quality evidence changed');
     const currentAttempts=await store.read('application-ledger.json',[]),currentRestart=await restartException(store,packet.restartAuthorizationId,packet.job,current,currentAttempts,adapter,now(),attempt.id);
     if(current.resumeSha256!==packet.resumeSha256||current.profileSha256!==packet.profileSha256||current.searchSha256!==packet.searchSha256||!applicationAuthorization(current.policy,packet,adapter,await store.read('application-approvals.json',[]),now())||packet.restartAuthorizationId&&!currentRestart||!currentRestart&&duplicate(packet.job,current.history,currentAttempts.filter(a=>a.id!==attempt.id),current.reapplicationReviews))throw Error('Submission authorization or applicant state changed');
     attempt.verificationCheckpoint=await adapter.captureVerificationCheckpoint?.(activeInspection);
@@ -394,6 +412,6 @@ export async function configureApplications({home,profileFile,maxPerDay=15,daily
  const approval=await store.read('resume-approval.json',null),connections=await store.read('connections.json',null);
  if(!connections?.resume||!approval?.approved||approval.sha256!==digest(await readFile(path.resolve(store.root,connections.resume))))throw Error('Approve the exact attached PDF first');
  await store.write('application-profile.json',profile);
- await store.write('application-policy.json',{version:1,enabled:true,maxPerDay,dailyBudgetUsd,timezone,requireICReview:true,resumeApprovalPath:'resume-approval.json',verifiedProfileSha256:digest(profile),authorizationMode:'per-posting-packet'});
+ await store.write('application-policy.json',{version:1,enabled:true,submissionMode:'manual',requireQualityReview:true,automationRiskAcknowledged:false,maxPerDay,dailyBudgetUsd,timezone,requireICReview:true,resumeApprovalPath:'resume-approval.json',verifiedProfileSha256:digest(profile),authorizationMode:'per-posting-packet'});
  return {maxPerDay,dailyBudgetUsd,timezone};
 }

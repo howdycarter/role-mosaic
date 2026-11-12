@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import {roleTrack} from './quality.js';
 const terms = (s, items = []) => items.filter(x => new RegExp(`(?:^|[^a-z0-9])${x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:$|[^a-z0-9])`, 'i').test(s));
 export function canonical(raw) {
  const u = new URL(raw); u.hash='';
@@ -28,6 +29,7 @@ export function evaluate(job, config) {
  if(!local.length&&!remote) reasons.push('Location needs review');
  if(/\b(intern|internship|unpaid)\b/i.test(job.title)) reasons.push('Excluded title');
  if(/\b(counsel|attorney|litigation|people partners?|product marketing|product sales|field sales|construction|product finance)\b/i.test(job.title)) reasons.push('Title belongs to a different profession or function');
+ if(!roleTrack(job.title)&&!reasons.includes('Title belongs to a different profession or function'))reasons.push('Title belongs to a different profession or function');
  if((config.excludeEmployers||[]).some(x=>job.company.toLowerCase().includes(x.toLowerCase()))) reasons.push('Excluded employer');
  const pay=compensation(job,config); if(!pay.pass) reasons.push(pay.reason);
  const score=(levels.length?30:0)+(fields.length?30:0)+(local.length||remote?20:0)+(pay.pass?20:0);
