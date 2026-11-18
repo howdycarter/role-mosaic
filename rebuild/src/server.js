@@ -1,6 +1,8 @@
+import {answerGreenhouseQuestion,forgetGreenhouseAnswer,readGreenhouseInbox} from './greenhouse-inbox.js';
+import {checkPacketQuestions,isHostedGreenhouseJob} from './manual-greenhouse-questions.js';
 import {confirmedReceipt,recordOutcome,summarizeOutcomes} from './outcomes.js';
 import http from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { home,read,write } from './store.js';
@@ -17,12 +19,40 @@ const token=randomBytes(32).toString('hex');
 let busy=false, lastRun=null;
 const worker=new MosaicWorker({home});
 const runWorker=work=>{work.catch(()=>{});};
+// Dashboard polling must not parse the entire saved job inventory on every
+// idle refresh. Mutating endpoints and worker authorization always read disk.
+let cachedInbox;
+async function inboxView() {
+ const files=['greenhouse-inbox.json','application-profile.json','application-policy.json','jobs.json','application-ledger.json','history.json'];
+ const versions=await Promise.all(files.map(async file=>{
+  try{
+   const info=await stat(path.join(home,file),{bigint:true});
+   return [info.ino,info.mtimeNs,info.ctimeNs,info.size].join('/');
+  }catch(error){if(error.code==='ENOENT')return '-';throw error;}
+ }));
+ const version=versions.join('|');
+ if(cachedInbox?.version!==version)cachedInbox={version,promise:readGreenhouseInbox(worker.store)};
+ const snapshot=cachedInbox;
+ try{return await snapshot.promise;}catch(error){if(cachedInbox===snapshot)cachedInbox=null;throw error;}
+}
+function continueInbox(jobIds) {
+ worker.continueInbox(jobIds).catch(error => {
+  worker.status.error = error.message;
+  worker.persist().catch(() => {});
+ });
+}
 async function body(req){let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>10000)throw Error('Request too large')}try{return JSON.parse(raw||'{}')}catch{throw Error('Malformed JSON request')}}
 const server=http.createServer(async(req,res)=>{
  const send=(status,data)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(data));};
  try {
   if(req.headers.host!==`127.0.0.1:${server.address().port}`) return send(403,{error:'Local access only'});
-  if(req.method==='GET'&&req.url==='/'){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Security-Policy':"default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'"});res.end((await readFile(new URL('../web/index.html',import.meta.url),'utf8')).replace('__TOKEN__',token));return;}
+  if(req.method==='GET'&&req.url==='/'){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Security-Policy':"default-src 'self'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'"});res.end((await readFile(new URL('../web/index.html',import.meta.url),'utf8')).replace('__TOKEN__',token));return;}
+  if(req.method==='GET'&&req.url==='/inbox.js'){
+   const script=await readFile(new URL('../web/inbox.js',import.meta.url));
+   res.writeHead(200,{'Content-Type':'text/javascript; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});
+   return res.end(script);
+  }
+  if(req.method==='GET'&&req.url==='/api/inbox')return send(200,await inboxView());
   if(req.method==='GET'&&req.url.startsWith('/api/packet?')){const id=new URL(req.url,'http://'+req.headers.host).searchParams.get('id');if(!/^[a-f0-9]{64}$/.test(id||''))return send(400,{error:'Invalid packet identifier'});let html;try{html=packetHtml(await refreshPacket(home,JSON.parse(await readFile(path.join(home,'packets',id+'.json'),'utf8'))))}catch(e){if(e.code==='ENOENT')return send(404,{error:'Packet not found'});throw e}res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"});res.end(html);return;}
   if(req.method==='GET'&&req.url==='/api/health') {
    try {
@@ -42,10 +72,40 @@ const server=http.createServer(async(req,res)=>{
     Number(b.listingState!=='unlisted')-Number(a.listingState!=='unlisted') ||
     Number(b.fit.disposition==='match')-Number(a.fit.disposition==='match') ||
     b.fit.score-a.fit.score || Number(a.previous)-Number(b.previous) ||
-    String(b.firstSeen||'').localeCompare(String(a.firstSeen||''))),qualityPackets:quality.packets.map(p=>({id:p.id,job:p.job,track:p.quality.track,ready:p.quality.ready,reasons:p.quality.reasons,missingRequirements:p.quality.missingRequirements,resume:p.quality.resume,proofCount:p.proofPoints.length,caseStudyCount:p.caseStudies.length})),evidenceIssues:quality.evidenceIssues||[],submissionMode,config,resume,career,authorizationMode:policy.authorizationMode||'per-posting-packet',boards:connections.boards||[],historyCount:history.length,busy:busy||worker.running,lastRun,worker:worker.status,workerConfig:await worker.config(),notion:{mode:notion.enabled?'direct integration':'saved snapshot',pageId:notion.pageId||null},applications:{packets:applicationPlan.packets.filter(p=>!applicationLedger.some(a=>a.packetDigest===p.digest)).map(p=>({id:p.id,company:p.job.company,title:p.job.title,url:p.job.url,salary:p.salary,resumeFilename:p.resumeFilename,fields:p.fields,answersPreview:p.answersPreview||[],expiresAt:p.expiresAt,approved:approvals.some(a=>a.approved&&a.packetDigest===p.digest&&Date.parse(a.expiresAt)>Date.now())})),held:applicationPlan.held,attempts:applicationLedger.map(a=>({id:a.id,canRecordOutcome:!!confirmedReceipt(a),company:a.company,title:a.title,status:a.status,reason:a.reason||'',createdAt:a.createdAt,canVerifyEmail:a.status==='submission_unknown'&&a.emailVerificationPending===true&&!!a.verificationCheckpoint&&!!worker.adapter?.preservedPage?.(a,{exact:true}),canResume:submissionMode==='automatic'&&a.status==='held'&&(policy.authorizationMode==='search-rules'&&policy.standingAuthorization?.enabled===true||applicationPlan.packets.some(p=>p.digest===a.packetDigest&&Date.parse(p.expiresAt)>Date.now()))}))},applicationStatus:submissionMode==='manual'?'Manual final submission. Mosaic prepares local evidence packets without filling, uploading or submitting. Existing receipts and explicitly authorized original-form verification remain available.':'Experimental automatic submission. Browser automation is detectable; current evidence, exact track PDF and authorization checks still apply. Only employer confirmation counts as submitted.'});
+    String(b.firstSeen||'').localeCompare(String(a.firstSeen||''))),qualityPackets:quality.packets.map(p=>({id:p.id,job:p.job,canCheckQuestions:!p.stale&&isHostedGreenhouseJob(p.job.url),track:p.quality.track,ready:p.quality.ready,reasons:p.quality.reasons,missingRequirements:p.quality.missingRequirements,resume:p.quality.resume,proofCount:p.proofPoints.length,caseStudyCount:p.caseStudies.length})),evidenceIssues:quality.evidenceIssues||[],submissionMode,config,resume,career,authorizationMode:policy.authorizationMode||'per-posting-packet',boards:connections.boards||[],historyCount:history.length,busy:busy||worker.running,lastRun,worker:worker.status,workerConfig:await worker.config(),notion:{mode:notion.enabled?'direct integration':'saved snapshot',pageId:notion.pageId||null},applications:{packets:applicationPlan.packets.filter(p=>!applicationLedger.some(a=>a.packetDigest===p.digest)).map(p=>({id:p.id,company:p.job.company,title:p.job.title,url:p.job.url,salary:p.salary,resumeFilename:p.resumeFilename,fields:p.fields,answersPreview:p.answersPreview||[],expiresAt:p.expiresAt,approved:approvals.some(a=>a.approved&&a.packetDigest===p.digest&&Date.parse(a.expiresAt)>Date.now())})),held:applicationPlan.held,attempts:applicationLedger.map(a=>({id:a.id,canRecordOutcome:!!confirmedReceipt(a),company:a.company,title:a.title,status:a.status,reason:a.reason||'',createdAt:a.createdAt,canVerifyEmail:a.status==='submission_unknown'&&a.emailVerificationPending===true&&!!a.verificationCheckpoint&&!!worker.adapter?.preservedPage?.(a,{exact:true}),canResume:submissionMode==='automatic'&&a.status==='held'&&(policy.authorizationMode==='search-rules'&&policy.standingAuthorization?.enabled===true||applicationPlan.packets.some(p=>p.digest===a.packetDigest&&Date.parse(p.expiresAt)>Date.now()))}))},applicationStatus:submissionMode==='manual'?'Manual final submission. Mosaic prepares local evidence packets without filling, uploading or submitting. Existing receipts and explicitly authorized original-form verification remain available.':'Experimental automatic submission. Browser automation is detectable; current evidence, exact track PDF and authorization checks still apply. Only employer confirmation counts as submitted.'});
   }
   if(req.method==='POST') {
    if(req.headers['x-rolemosaic-token']!==token||req.headers.origin!==`http://${req.headers.host}`)return send(403,{error:'Invalid local session'});
+   if(req.url==='/api/inbox/answer'){
+    try {
+     const {id,jobId,channel,revision,scope,answer,confirm}=await body(req);
+     if(!['worker','manual'].includes(channel)||typeof revision!=='string'||!/^[a-f0-9]{64}$/.test(revision)){
+      return send(400,{error:'Refresh the inbox and use the displayed application and form revision.'});
+     }
+     const result=await answerGreenhouseQuestion({store:worker.store,id,jobId,channel,revision,scope,answer,confirm});
+     if(result.jobIds.length)continueInbox(result.jobIds);
+     const policy=await read('application-policy.json',{});
+     const output=policy.submissionMode!=='automatic'?'Answer saved for manual preparation.':
+       worker.paused?'Answer saved. The worker is paused.':
+       result.jobIds.length?'Answer saved. Mosaic will recheck the affected applications.':'Answer saved. Other requirements may still need review.';
+     return send(200,{jobIds:result.jobIds,output});
+    }catch(error){
+     return send(/stale|changed|already|lock|another|refresh|no longer/i.test(error.message)?409:400,{error:error.message});
+    }
+   }
+   if(req.url==='/api/inbox/forget'){
+    try{
+     const {id}=await body(req);
+     await forgetGreenhouseAnswer({store:worker.store,id});
+     return send(200,{output:'Answer forgotten. Future preparation will recheck this question.'});
+    }catch(error){return send(409,{error:error.message});}
+   }
+   if(req.url==='/api/inbox/check-packet'){
+    try {
+     const {packetId}=await body(req);
+     return send(200,await checkPacketQuestions({store:worker.store,packetId}));
+    }catch(error){return send(400,{error:error.message});}
+   }
    if(req.url==='/api/worker/pause')return send(200,await worker.pause());
    if(req.url==='/api/submission-mode'){if(worker.running||busy)return send(409,{error:'Wait for the current operation'});const data=await body(req);if(!['manual','automatic'].includes(data.mode)||data.mode==='automatic'&&(data.acknowledgeAutomationRisk!==true||data.confirm!=='acknowledge-detectable-automation'))return send(400,{error:'Automatic mode requires explicit acknowledgement that browser automation is detectable'});await worker.pause();const policy=await read('application-policy.json',{});if(policy.standingAuthorization)policy.standingAuthorization.enabled=false;await write('application-policy.json',{...policy,submissionMode:data.mode,requireQualityReview:true,automationRiskAcknowledged:data.mode==='automatic',automationRiskAcknowledgedAt:data.mode==='automatic'?new Date().toISOString():null,authorizationMode:'per-posting-packet'});return send(200,{output:data.mode==='manual'?'Manual final submission selected. Automatic authorization revoked.':'Experimental native mode selected; exact résumé, evidence and application authorization are still required.'});}
    if(req.url==='/api/application-mode'){const data=await body(req);if(!['search-rules','per-posting-packet'].includes(data.mode)||data.confirm!=='current-rules-and-approved-resume')return send(400,{error:'Explicitly enable or revoke automatic applications under your current rules and approved résumé'});if((busy||worker.running)&&data.mode==='search-rules')return send(409,{error:'Wait for the current operation before enabling a new authorization scope'});return send(200,await configureStandingAuthorization({home,enabled:data.mode==='search-rules',evidence:'Applicant explicitly enabled automatic matching applications under current search rules, approved résumé, verified facts, daily limit and budget through the local dashboard'}));}
@@ -85,7 +145,7 @@ const server=http.createServer(async(req,res)=>{
   send(404,{error:'Not found'});
  }catch(e){send(500,{error:e.message});}
 });
-server.listen(Number(process.env.PORT||4317),'127.0.0.1',async()=>{console.log(`RoleMosaic: http://127.0.0.1:${server.address().port}`);try{if((await worker.config()).enabled)runWorker(worker.start());}catch(e){worker.status.state='error';worker.status.error=e.message;}});
+server.listen(Number(process.env.PORT||4317),'127.0.0.1',async()=>{console.log(`RoleMosaic: http://127.0.0.1:${server.address().port}`);try{if((await worker.config()).enabled)runWorker(worker.start());else continueInbox();}catch(e){worker.status.state='error';worker.status.error=e.message;}});
 let shuttingDown=false;
 for(const signal of ['SIGTERM','SIGINT'])process.on(signal,async()=>{
  if(shuttingDown)return;shuttingDown=true;worker.paused=true;clearInterval(worker.timer);

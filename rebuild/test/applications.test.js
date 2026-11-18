@@ -3,7 +3,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';
 import path from 'node:path';import os from 'node:os';
-import {ApplicationStore,digest,prepareApplications,runApplications,postingKey,salaryForLocation,fillPlan,dayAt,configureStandingAuthorization,answerFor} from '../src/applications.js';
+import {ApplicationStore,digest,prepareApplications,runApplications,postingKey,samePosting,salaryForLocation,fillPlan,dayAt,configureStandingAuthorization,answerFor} from '../src/applications.js';
 const now=()=>new Date('2026-11-09T18:00:00Z');
 test('native callers cannot bypass quality with the legacy compatibility flag',async()=>{
  const f=await fixture();try{await f.authorize();f.adapter.transport='playwright';const p=await f.store.read('application-policy.json');await f.store.write('application-policy.json',{...p,requireQualityReview:false});await f.store.write('career-evidence.json',{sources:[],facts:[],caseStudies:[]});assert.equal((await f.run())[0].status,'quality_held');assert.deepEqual(f.events,[]);}finally{await f.close();}
@@ -298,5 +298,104 @@ test('a scoped substantive IC review enables only its unchanged role and applica
  const f=await fixture(),reviewNow=()=>new Date(),prepare=()=>prepareApplications({home:f.root,adapter:f.adapter,now:reviewNow});try{const job={...f.job,title:'Staff Product Designer',description:'Complex enterprise workflow design'};await f.store.write('jobs.json',[job]);await seedQuality(f.root,job,path.join(f.root,'resume.pdf'));const search=await f.store.read('search.json');await f.store.write('search.json',{...search,titleLevels:['staff'],titleFields:['product']});f.adapter.transport='playwright';await configureStandingAuthorization({home:f.root,evidence:'Applicant selected staff design and native automatic submissions',now:reviewNow});assert.equal((await prepare()).packets.length,0);
  let policy=await f.store.read('application-policy.json'),g=policy.standingAuthorization;policy.individualContributorReviews=[{jobId:job.id,postingKey:postingKey(job.url),jobSha256:digest({title:job.title,location:job.location,description:job.description}),resumeSha256:g.resumeSha256,profileSha256:g.profileSha256,searchSha256:g.searchSha256,reviewedAt:reviewNow().toISOString(),evidence:'Reviewed enterprise design qualifications against verified applicant history; no specialist engineering qualification inferred.'}];await f.store.write('application-policy.json',policy);
  assert.equal((await prepare()).packets.length,1);await f.store.write('jobs.json',[{...job,description:'Changed specialist requirements'}]);assert.equal((await prepare()).packets.length,0);await f.store.write('jobs.json',[job]);const {MosaicWorker}=await import('../src/worker.js');await new MosaicWorker({home:f.root,adapterFactory:async()=>f.adapter}).cycle({discover:false});assert.deepEqual(f.events,['fill','submit']);
+ }finally{await f.close();}
+});
+
+test('hosted Greenhouse applications require the same origin, tenant, and unambiguous requisition', () => {
+ const url='https://job-boards.greenhouse.io/example/jobs/123';
+ assert.equal(samePosting(url,url+'/confirmation'),true);
+ for(const other of [url.replace('example','another'),url.replace('123','456')+'?gh_jid=123',
+   url+'?gh_jid=123&gh_jid=999',url.replace('job-boards.','boards.'),url.replace('https://','https://name@')]){
+  assert.equal(samePosting(url,other),false);
+ }
+});
+
+async function prepareGreenhouseInbox(f){
+ const {readGreenhouseInbox,answerGreenhouseQuestion}=await import('../src/greenhouse-inbox.js');
+ f.adapter.transport='playwright';
+ f.form.fields.push({id:'notice',type:'text',label:'What is your notice period?',required:true,value:''});
+ await configureStandingAuthorization({home:f.root,evidence:'Standalone synthetic authorization'});
+ const first=await prepareApplications({home:f.root,adapter:f.adapter});
+ assert.equal(first.packets.length,0);
+ const {items}=await readGreenhouseInbox(f.store);
+ assert.equal(items.length,1);
+ const grant=await answerGreenhouseQuestion({store:f.store,id:items[0].id,jobId:f.job.id,scope:'future',answer:'14 days',channel:'worker',confirm:true});
+ assert.deepEqual(grant.jobIds,[f.job.id]);
+}
+
+test('a newly constructed worker honors a prior pause and resumes only explicitly selected preflight items',async()=>{
+ const f=await fixture();
+ try{
+  await prepareGreenhouseInbox(f);
+  const {MosaicWorker}=await import('../src/worker.js');
+  const make=()=>new MosaicWorker({home:f.root,adapterFactory:async()=>f.adapter});
+  const w=make();
+  assert.equal((await w.continueInbox(['unrelated'])).status,'empty');
+  await w.pause();
+  assert.equal((await make().continueInbox()).status,'paused');
+  assert.deepEqual(f.events,[]);
+  await w.cycle({discover:false});
+  // The same action as the explicit "Run once" control resumes this worker.
+  w.paused=false;
+  await w.cycle({discover:false,submit:false});
+  const [packet]=(await f.store.read('application-plan.json')).packets;
+  assert.ok(packet.inboxAnswerSha256);
+  // Crash window after durable preparation: no observation or worker timer is required.
+  const restarted=make();
+  assert.equal((await restarted.continueInbox()).status,'continued');
+  assert.deepEqual(f.events,['fill','submit']);
+  assert.equal((await restarted.continueInbox()).status,'empty');
+  assert.equal((await f.store.read('worker.json')).enabled,false);
+ }finally{await f.close();}
+});
+
+test('forgetting a Greenhouse answer invalidates its pending packet and restores the blocker without transmitting',async()=>{
+ const f=await fixture();
+ try{
+  const {forgetGreenhouseAnswer,readGreenhouseInbox}=await import('../src/greenhouse-inbox.js');
+  await prepareGreenhouseInbox(f);
+  const [{id}]=(await readGreenhouseInbox(f.store)).savedAnswers;
+  const plan=await prepareApplications({home:f.root,adapter:f.adapter});
+  assert.ok(plan.packets[0].inboxAnswerSha256);
+  await forgetGreenhouseAnswer({store:f.store,id});
+  const {MosaicWorker}=await import('../src/worker.js');
+  await new MosaicWorker({home:f.root,adapterFactory:async()=>f.adapter}).cycle({discover:false});
+  assert.equal((await f.store.read('application-plan.json')).packets.length,0);
+  assert.deepEqual((await readGreenhouseInbox(f.store)).waitingJobIds,[f.job.id]);
+  assert.deepEqual(f.events,[]);
+ }finally{await f.close();}
+});
+
+test('employer changes to the meaning of a Greenhouse question during fill hold the existing draft before submit',async()=>{
+ const f=await fixture();
+ try{
+  await prepareGreenhouseInbox(f);
+  const plan=await prepareApplications({home:f.root,adapter:f.adapter});
+  assert.ok(plan.packets[0].inboxAnswerSha256);
+  f.adapter.fill=async()=>{f.events.push('fill');f.form.fields.at(-1).description='Changed employer qualification';};
+  const [attempt]=await runApplications({home:f.root,adapter:f.adapter});
+  assert.equal(attempt.status,'held');
+  assert.deepEqual(f.events,['fill']);
+ }finally{await f.close();}
+});
+
+test('an unanswered worker question is re-observed after its inspection interval when the employer removes it',async()=>{
+ const f=await fixture();
+ try{
+  const {MosaicWorker}=await import('../src/worker.js');
+  const {readGreenhouseInbox}=await import('../src/greenhouse-inbox.js');
+  f.adapter.transport='playwright';
+  f.form.fields.push({id:'notice',type:'text',label:'What is your notice period?',required:true,value:''});
+  const worker=new MosaicWorker({home:f.root,adapterFactory:async()=>f.adapter});
+  await worker.cycle({discover:false,submit:false});
+  assert.deepEqual((await readGreenhouseInbox(f.store)).waitingJobIds,[f.job.id]);
+  f.form.fields.pop();
+  await worker.cycle({discover:false,submit:false});
+  assert.equal((await f.store.read('application-plan.json')).packets.length,0);
+  await f.store.write('worker-inspected.json',{[f.job.id]:new Date(Date.now()-25*3600*1000).toISOString()});
+  await worker.cycle({discover:false,submit:false});
+  assert.deepEqual((await readGreenhouseInbox(f.store)).waitingJobIds,[]);
+  assert.equal((await f.store.read('application-plan.json')).packets.length,1);
+  assert.deepEqual(f.events,[]);
  }finally{await f.close();}
 });

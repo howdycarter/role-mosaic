@@ -1,9 +1,10 @@
 import {open,unlink,mkdir} from 'node:fs/promises';
 import path from 'node:path';
-import {ApplicationStore,prepareApplications,runApplications,reconcileApplications,postingKey,authorizationMatches,standingAuthorizationMatches,supportedPosting,individualContributorReviewed,continueApplicationVerification} from './applications.js';
+import {ApplicationStore,prepareApplications,runApplications,reconcileApplications,postingKey,authorizationMatches,standingAuthorizationMatches,supportedPosting,meetsContributorRule,continueApplicationVerification} from './applications.js';
 import {evaluate,historyMatch,reapplicationHistory} from './core.js';
 import {scanBoards} from './discovery.js';
 import {campaignProgress} from './campaign.js';
+import {readGreenhouseInbox} from './greenhouse-inbox.js';
 import {prepareQualityPackets} from './packets.js';
 
 export const workerDefaults={enabled:false,intervalMinutes:30,maxInspections:15,headless:false,channel:'chrome',autoSubmitApproved:true};
@@ -30,19 +31,70 @@ export class MosaicWorker {
   await this.persist();
   if(this.status.discovery.status==='failed')throw Error('All employer sources failed; saved jobs preserved');
  }
- async cycle({discover=true,prepare=true,submit=true,jobIds}={}){
+ // Saving an answer requests one scoped run. Nothing here enables a scheduler or changes policy.
+ async continueInbox(affectedJobIds){
+  if(this.running || this.inboxDraining){
+   this.inboxWakeRequested=true;
+   if(!affectedJobIds)this.wakeAllInbox=true;
+   else for(const id of affectedJobIds)(this.wakeJobIds??=new Set()).add(id);
+   return {status:'queued',jobIds:[]};
+  }
+  this.inboxDraining=true;
+  try{
+   const policy=await this.store.read('application-policy.json',{});
+   if(!policy.enabled || policy.submissionMode!=='automatic' || policy.automationRiskAcknowledged!==true)return {status:'manual',jobIds:[]};
+   const last=await this.store.read('worker-state.json',{});
+   if(this.paused || ['paused','pausing','complete'].includes(last.state))return {status:'paused',jobIds:[]};
+   const config=await this.config();
+   const inbox=await readGreenhouseInbox(this.store);
+   const [plan,ledger,approvals]=await Promise.all([this.store.read('application-plan.json',{packets:[]}),this.store.read('application-ledger.json',[]),this.store.read('application-approvals.json',[])]);
+   // A restart can occur after the immutable packet is saved but before its authorized run.
+   const now=new Date();
+   const pending=plan.packets.filter(p=>p.inboxAnswerSha256 && !p.restartAuthorizationId &&
+    !ledger.some(a=>a.jobId===p.job.id || a.packetDigest===p.digest) && config.autoSubmitApproved &&
+    (standingAuthorizationMatches(policy,p,{transport:'playwright'}) || approvals.some(a=>authorizationMatches(a,p,now))));
+   const requested=affectedJobIds&&new Set(affectedJobIds);
+   const jobIds=[...new Set([...inbox.readyJobIds,...pending.map(p=>p.job.id)])].filter(id=>!requested||requested.has(id));
+   if(!jobIds.length)return {status:'empty',jobIds:[]};
+   const batchSize=Math.min(config.maxInspections,policy.maxPerDay);
+   if(!Number.isInteger(batchSize)||batchSize<1)throw Error('Invalid inbox worker batch size');
+   for(let offset=0;offset<jobIds.length;offset+=batchSize){
+    if(this.paused || this.status.state==='complete')break;
+    if(this.running)return this.continueInbox(jobIds.slice(offset));
+    await this.cycle({discover:false,inboxOnly:true,jobIds:jobIds.slice(offset,offset+batchSize)});
+   }
+   return {status:'continued',jobIds};
+  }finally{
+   this.inboxDraining=false;
+   this.wakeQueuedInbox();
+  }
+ }
+ wakeQueuedInbox(){
+  if(!this.inboxWakeRequested || this.inboxDraining || this.running)return;
+  this.inboxWakeRequested=false;
+  const selected=this.wakeAllInbox ? undefined : [...this.wakeJobIds||[]];
+  this.wakeAllInbox=false;
+  this.wakeJobIds=new Set();
+  setImmediate(()=>this.continueInbox(selected).catch(error=>{
+   this.status.error=String(error.message).slice(0,300);
+   this.persist().catch(()=>{});
+  }));
+ }
+ async cycle({discover=true,prepare=true,submit=true,jobIds,inboxOnly=false}={}){
   if(this.running)throw Error('Worker already running');
+  this.running=true;
   const lock=path.join(this.home,'worker-run.lock');let handle;
-  try{handle=await open(lock,'wx',0o600);}catch(e){if(e.code==='EEXIST')throw Error('Another worker owns this workspace; inspect its state before recovery');throw e;}
-  this.running=true;this.status={...this.status,state:'running',stage:'starting',error:null,startedAt:new Date().toISOString()};await handle.writeFile(JSON.stringify({pid:process.pid,startedAt:this.status.startedAt}));await handle.close();
+  try{handle=await open(lock,'wx',0o600);}catch(e){this.running=false;if(e.code==='EEXIST')throw Error('Another worker owns this workspace; inspect its state before recovery');throw e;}
+  this.status={...this.status,state:'running',stage:'starting',error:null,startedAt:new Date().toISOString()};await handle.writeFile(JSON.stringify({pid:process.pid,startedAt:this.status.startedAt}));await handle.close();
   try{
    const config=await this.config();await this.persist();
    if(await this.stopAtTarget())return this.status;
    const notion=await this.store.read('notion-connection.json',{});
-   if(notion.enabled&&!this.paused){this.status.stage='Notion sync';await this.persist();const {syncNotion}=await import('./notion-sync.js');this.status.notion=await syncNotion({home:this.home,fetcher:this.fetcher});}
+   if(!inboxOnly&&notion.enabled&&!this.paused){this.status.stage='Notion sync';await this.persist();const {syncNotion}=await import('./notion-sync.js');this.status.notion=await syncNotion({home:this.home,fetcher:this.fetcher});}
    if(discover&&!this.paused){this.status.stage='discovery';await this.persist();await this.discover();}
    if(this.paused){this.status.state='paused';this.status.stage='paused before application work';return this.status;}
    const executionPolicy=await this.store.read('application-policy.json',{});
+   if(inboxOnly && (!executionPolicy.enabled || executionPolicy.submissionMode!=='automatic' || executionPolicy.automationRiskAcknowledged!==true)){this.status.state='idle';return this.status;}
    if(executionPolicy.submissionMode!=='automatic'){
     this.status.stage='preparing local evidence packets';this.status.submissionMode='manual';await this.persist();
     const result=prepare?await prepareQualityPackets({home:this.home,jobIds,limit:config.maxInspections}):await this.store.read('quality-packets.json',{packets:[]});
@@ -56,32 +108,46 @@ export class MosaicWorker {
    let plan=await this.store.read('application-plan.json',{packets:[],held:[]});
    let ledger=await this.store.read('application-ledger.json',[]);
    const now=new Date(),approvals=await this.store.read('application-approvals.json',[]),policy=await this.store.read('application-policy.json',{});
-   const authorized=plan.packets.filter(p=>Date.parse(p.expiresAt)>now.getTime()&&!ledger.some(a=>a.packetDigest===p.digest)&&(standingAuthorizationMatches(policy,p,adapter)||approvals.some(a=>authorizationMatches(a,p,now))));
+   const authorized=plan.packets.filter(p=>(!jobIds||jobIds.includes(p.job.id))&&Date.parse(p.expiresAt)>now.getTime()&&!ledger.some(a=>a.packetDigest===p.digest)&&(standingAuthorizationMatches(policy,p,adapter)||approvals.some(a=>authorizationMatches(a,p,now))));
+   const recheckIds=new Set();
    if(submit&&config.autoSubmitApproved&&authorized.length&&!this.paused){
     this.status.stage='approved applications';await this.persist();
     // One packet at a time permits Pause between applications. Engine writes
     // durable submission_unknown BEFORE its only final submission click.
-    for(const packet of authorized){if(!await this.canContinue())break;await runApplications({home:this.home,adapter,packetIds:[packet.id],shouldContinue:()=>this.canContinue()});}
+    for(const packet of authorized){
+     if(!await this.canContinue())break;
+     const result=await runApplications({home:this.home,adapter,packetIds:[packet.id],shouldContinue:()=>this.canContinue()});
+     if(result.some(r=>r.status==='posting_or_form_changed')&&!packet.restartAuthorizationId){
+      // This check happens before a draft or submit. Re-inspect the posting, preserving other approvals.
+      recheckIds.add(packet.job.id);
+     }
+    }
    }
    if(await this.stopAtTarget())return this.status;
    ledger=await this.store.read('application-ledger.json',[]);
-   const pending=plan.packets.filter(p=>Date.parse(p.expiresAt)>Date.now()&&!ledger.some(a=>a.packetDigest===p.digest));
-   if(prepare&&!pending.length&&!this.paused){
+   const pending=plan.packets.filter(p=>!recheckIds.has(p.job.id)&&Date.parse(p.expiresAt)>Date.now()&&!ledger.some(a=>a.packetDigest===p.digest));
+   if(prepare&&!this.paused){
     this.status.stage='preparing applications';await this.persist();
     const [jobs,search,history,seen]=await Promise.all([this.store.read('jobs.json',[]),this.store.read('search.json',{}),this.store.read('history.json',[]),this.store.read('worker-inspected.json',{})]);
     const reviews=await this.store.read('reapplication-reviews.json',[]);
+    const inbox=await readGreenhouseInbox(this.store);
+    const ready=new Set(inbox.readyJobIds);
+    const pendingKeys=new Set(pending.map(packet=>postingKey(packet.job.url)));
     const candidates=jobs.filter(j=>{
      const blockingHistory=reapplicationHistory(j,history,reviews);
      if(j.listingState==='unlisted'||!supportedPosting(j.url))return false;
      if(jobIds&&!jobIds.includes(j.id))return false;
+     if(pendingKeys.has(postingKey(j.url)))return false;
+     // An unanswered form can change at the employer. Let the normal inspection interval
+     // revisit it; a newly answered blocker bypasses the interval below.
      if(['applied','dismissed','rejected'].includes(j.status)||historyMatch(j,blockingHistory)||ledger.some(a=>a.jobId===j.id))return false;
      if(blockingHistory.some(r=>{try{return r.posting&&postingKey(r.posting)===postingKey(j.url)}catch{return false}}))return false;
-     if(!jobIds&&seen[j.id]&&Date.now()-Date.parse(seen[j.id])<24*60*60000)return false;
+     if(!jobIds&&!ready.has(j.id)&&!recheckIds.has(j.id)&&seen[j.id]&&Date.now()-Date.parse(seen[j.id])<24*60*60000)return false;
      const fit=evaluate({...j,compensation:j.compensation||{min:search.minAnnualBaseUsd,currency:'USD',interval:'year'}},search);
-     return (/director|vice president|\bvp\b|head|chief/i.test(j.title)||individualContributorReviewed(j,policy))&&!fit.reasons.some(r=>!['Annual USD base compensation needs verification','Location needs review'].includes(r));
+     return meetsContributorRule(j,policy)&&!fit.reasons.some(r=>!['Annual USD base compensation needs verification','Location needs review'].includes(r));
     }).sort((a,b)=>{
      const rank=j=>evaluate({...j,compensation:j.compensation||{min:search.minAnnualBaseUsd,currency:'USD',interval:'year'}},search).score+(/\bremote\b/i.test(j.location)?5:0);
-     return rank(b)-rank(a);
+     return Number(ready.has(b.id))-Number(ready.has(a.id)) || rank(b)-rank(a);
     }).slice(0,config.maxInspections);
     if(candidates.length){
      plan=await prepareApplications({home:this.home,adapter,jobIds:candidates.map(j=>j.id)});
@@ -90,18 +156,19 @@ export class MosaicWorker {
      if(submit&&config.autoSubmitApproved&&!this.paused){for(const packet of plan.packets){if(!await this.canContinue())break;if(standingAuthorizationMatches(await this.store.read('application-policy.json',{}),packet,adapter))await runApplications({home:this.home,adapter,packetIds:[packet.id],shouldContinue:()=>this.canContinue()});}}
     }
    }
+   plan=await this.store.read('application-plan.json',{packets:[],held:[]});
    ledger=await this.store.read('application-ledger.json',[]);this.status.authorizationMode=policy.authorizationMode||'per-posting-packet';
    if(await this.stopAtTarget())return this.status;
    this.status.plan={prepared:plan.packets.filter(p=>!ledger.some(a=>a.packetDigest===p.digest)&&Date.parse(p.expiresAt)>Date.now()).length,held:plan.held};
    this.status.lastRun=new Date().toISOString();this.status.state=this.paused?'paused':'idle';this.status.stage='finished';return this.status;
   }catch(e){this.status.state='error';this.status.error=String(e.message).slice(0,300);throw e;}
-  finally{this.running=false;await this.persist();await unlink(lock);}
+  finally{try{await this.persist();await unlink(lock);}finally{this.running=false;this.wakeQueuedInbox();}}
  }
  async resume(attemptId){
   if(this.running)throw Error('Worker already running');
   const lock=path.join(this.home,'worker-run.lock');let handle;try{handle=await open(lock,'wx',0o600);}catch(e){if(e.code==='EEXIST')throw Error('Another worker owns this workspace');throw e;}
   this.running=true;this.paused=false;this.status.state='running';this.status.stage='continuing reviewed draft';this.status.error=null;await this.persist();
-  try{await handle.writeFile(JSON.stringify({pid:process.pid,startedAt:new Date().toISOString()}));await handle.close();if((await this.store.read('application-policy.json',{})).submissionMode!=='automatic'){this.status.state='paused';this.status.stage='manual final submission';return [{status:'review_only'}];}if(await this.stopAtTarget())return [];const adapter=await this.browser();const result=await runApplications({home:this.home,adapter,resumeAttemptId:attemptId,shouldContinue:()=>this.canContinue()});this.status.lastRun=new Date().toISOString();if(!await this.stopAtTarget()){this.status.state=this.paused?'paused':'idle';this.status.stage='finished';}return result;}catch(e){this.status.state='error';this.status.error=String(e.message).slice(0,300);throw e;}finally{this.running=false;await this.persist();await unlink(lock);}
+  try{await handle.writeFile(JSON.stringify({pid:process.pid,startedAt:new Date().toISOString()}));await handle.close();if((await this.store.read('application-policy.json',{})).submissionMode!=='automatic'){this.status.state='paused';this.status.stage='manual final submission';return [{status:'review_only'}];}if(await this.stopAtTarget())return [];const adapter=await this.browser();const result=await runApplications({home:this.home,adapter,resumeAttemptId:attemptId,shouldContinue:()=>this.canContinue()});this.status.lastRun=new Date().toISOString();if(!await this.stopAtTarget()){this.status.state=this.paused?'paused':'idle';this.status.stage='finished';}return result;}catch(e){this.status.state='error';this.status.error=String(e.message).slice(0,300);throw e;}finally{try{await this.persist();await unlink(lock);}finally{this.running=false;this.wakeQueuedInbox();}}
  }
  async review(attemptId){
   if(this.running)throw Error('Wait for the current worker operation');
@@ -123,12 +190,12 @@ export class MosaicWorker {
   const lock=path.join(this.home,'worker-run.lock'),handle=await open(lock,'wx',0o600);await handle.writeFile(JSON.stringify({pid:process.pid,operation:'existing email verification',at:new Date().toISOString()}));await handle.close();
   this.running=true;this.status.state='verifying';this.status.stage='completing existing email verification';await this.persist();
   try{return await continueApplicationVerification({...data,home:this.home,adapter:this.adapter});}
-  finally{this.running=false;this.status.state=this.paused?'paused':'idle';this.status.stage='verification check finished';await this.persist();await unlink(lock);}
+  finally{this.status.state=this.paused?'paused':'idle';this.status.stage='verification check finished';try{await this.persist();await unlink(lock);}finally{this.running=false;this.wakeQueuedInbox();}}
  }
  async reconcileReceipts(){
   if(this.running)throw Error('Wait for the current worker operation');
   const lock=path.join(this.home,'worker-run.lock'),handle=await open(lock,'wx',0o600);await handle.writeFile(JSON.stringify({pid:process.pid,operation:'read-only receipt recovery'}));await handle.close();this.running=true;
   try{const adapter=this.adapter||{recoverReceipt:async a=>({confirmed:false,posting:a.url})};const result=await reconcileApplications({home:this.home,adapter});this.status.reconciled=result;this.status.campaign=await campaignProgress({home:this.home});return result;}
-  finally{this.running=false;await this.persist();await unlink(lock);}
+  finally{try{await this.persist();await unlink(lock);}finally{this.running=false;this.wakeQueuedInbox();}}
  }
 }

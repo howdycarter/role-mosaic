@@ -172,3 +172,19 @@ npm start -- outcomes --resume-sha256 FULL_APPROVED_PDF_DIGEST
 The report counts each confirmed posting once. It measures the share with a recorded screen invitation, interview invitation or offer in its first 30 UTC calendar days. A cohort enters the denominator after that window closes. Missing replies appear as unknown outcomes. A rate depends on how completely you recorded incoming responses. Submitted applications with insufficient receipt evidence and unresolved submissions are shown separately. The dashboard accepts local entries; recording a response sends nothing to an employer.
 
 Run `npm start -- shortlist --track fde --limit 10` after discovery to check employer postings for a single track. The command reads official postings, including Greenhouse's dedicated pay-transparency data. It skips prior applications and openings missing from a successful board scan. It reports pay evidence, titles that changed, and requirements that still need review. It does not open application forms.
+
+## Greenhouse inbox
+
+Open the local dashboard and look for **Needs your input**. When Mosaic inspects a supported Greenhouse posting, a required question it can safely ask appears with the employer, role, question wording and available choices. Select the application, enter your answer and choose **Save answer and continue**.
+
+- **Only this application** binds an answer to that posting and its observed form.
+- **Matching questions at this employer** limits reuse to the same Greenhouse board and compatible question.
+- **Matching questions at any employer** is offered for a small set of portable facts such as notice period. The wording, help, field type, choices and verified applicant profile must match. The dashboard shows which current applications the selection covers.
+
+Use **Saved Greenhouse answers → Forget answer** to stop future reuse. Answers stay in the private workspace. The normal receipt, budget, eligibility, résumé and authorization checks apply to each posting.
+
+**Manual preparation.** Choose **Check public Greenhouse questions** on a current evidence packet. Mosaic reads the employer’s published required custom questions over a public GET. Answer in the inbox and use the saved answers shown in the packet’s question summary when completing the employer form yourself. Checking a packet requires a verified local application profile. The [Greenhouse Job Board API](https://docs.greenhouse.io/job-board.html) can expose a different subset of questions from the live form.
+
+**Automatic mode.** Within an already authorized native workflow, saving the final missing answer wakes the worker for the affected applications. Other postings can continue while a question waits. The worker verifies each live form and rechecks the applicable saved answers before submitting. A workspace using per-packet approval still requires that approval. A paused worker stays paused. A normal service restart recovers eligible answered work.
+
+**Coverage.** This release handles required preflight questions on hosted Greenhouse boards, including text, numeric and single-choice fields with known choices. Questions that appear only after filling begins, human verification, signatures, sensitive manual controls and unsupported form widgets use the existing held-draft workflow. See **Application review** for the reason. An uncertain final submission stays reserved for receipt reconciliation. An abrupt process kill can leave an application or worker lock that requires inspection before recovery.

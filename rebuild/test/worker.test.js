@@ -16,7 +16,10 @@ test('independent worker preserves waiting packets, submits only approved packet
   const adapter={estimatedCostUsd:0,inspect:async job=>{inspections++;return {job,tabId:'fixture',titleVerified:true,description:'Annual base salary $200,000 - $250,000 USD per year',location:'Remote US',form:{fields:[{id:'name',label:'Name',type:'text',required:true,value:''}],resume:{label:'Resume'},submit:{label:'Submit application'}}}},fill:async()=>{fills++},verify:async()=>({ok:true}),submit:async()=>{submits++},confirm:async()=>({confirmed:true,posting:url,text:'Thank you for applying'})};
   const worker=new MosaicWorker({home,adapterFactory:async()=>adapter});
   await worker.cycle({discover:false});const original=await s.read('application-plan.json');assert.equal(original.packets.length,1);assert.equal(original.packets[0].job.id,'job');assert.equal(fills,0);
-  await worker.cycle({discover:false});assert.deepEqual(await s.read('application-plan.json'),original);assert.equal(inspections,1);assert.equal(submits,0);
+  await worker.cycle({discover:false});
+  const expanded=await s.read('application-plan.json');
+  assert.deepEqual(expanded.packets.find(packet=>packet.id===original.packets[0].id),original.packets[0]);
+  assert.equal(expanded.packets.length,2);assert.equal(inspections,2);assert.equal(submits,0);
   await approvePackets({home,ids:original.packets.map(p=>p.id)});await worker.cycle({discover:false,prepare:false});assert.equal(submits,1);assert.equal(fills,1);
   await worker.cycle({discover:false,prepare:false});assert.equal(submits,1);assert.equal((await s.read('history.json')).length,1);
   await worker.pause();await worker.cycle({discover:false});assert.equal(submits,1);assert.equal(worker.status.state,'paused');

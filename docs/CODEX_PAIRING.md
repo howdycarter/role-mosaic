@@ -6,6 +6,8 @@ Mosaic's native worker is experimental. Supported-form tests and a running local
 
 Mosaic discovers roles, checks the configured rules and history, prepares forms, enforces approved PDF/profile/search bindings and limits, and preserves attempts and employer receipts. Codex reviews substantive fit, reads the observed questions and choices, and drafts answers from verified career history. This pairing uses the active Codex session; Mosaic does not silently launch a separate Codex service or purchase model API usage.
 
+For hosted Greenhouse openings, the [local decision inbox](../rebuild/README.md#greenhouse-inbox) handles supported required preflight questions directly. The applicant chooses the permitted reuse scope in the dashboard. Existing application permissions govern how far the worker can continue.
+
 ## Resolve a held answer
 
 1. Inspect the role, question, visible choices and hold reason. Preparation must not transmit applicant details. Use the native worker's read-only review for a preserved draft; its local API requires the current dashboard token and matching loopback Origin.

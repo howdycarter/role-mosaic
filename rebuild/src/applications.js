@@ -5,12 +5,14 @@ import { evaluate, canonical, historyMatch, reapplicationHistory } from './core.
 import { optionForAnswer, sameAnswer } from './application-values.js';
 import {inspectQuality,qualityDigest,jobDigest} from './quality.js';
 import {mixedCompensation} from './sources.js';
+import {greenhousePosting, greenhouseAnswerFor, observeGreenhouseQuestions, readGreenhouseAnswers} from './greenhouse-inbox.js';
 export { optionForAnswer, sameAnswer } from './application-values.js';
 
 export const digest = value => createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');
 export function submissionHold(policy,adapter){if(policy.submissionMode!=='automatic')return 'review_only';if(adapter?.transport==='playwright'&&policy.automationRiskAcknowledged!==true)return 'automation_risk_unacknowledged';return null;}
 async function qualityGate(store,ctx,job,packet,adapter){
  const live=(await store.read('jobs.json',[])).find(j=>j.id===job.id);
+ if(['applied','dismissed','rejected','interview','offer'].includes(live?.status))return {ok:false,reasons:['Posting is already closed in the applicant workspace']};
  if(job.listingState==='unlisted'||live?.listingState==='unlisted')return {ok:false,reasons:['Posting is no longer listed on the employer board']};
  if(ctx.policy.requireQualityReview===false&&adapter?.transport!=='playwright')return {ok:true};
  const {assessment}=await inspectQuality(store.root,job),qualitySha256=qualityDigest(assessment);
@@ -24,6 +26,10 @@ export function individualContributorReviewed(job,policy,at=new Date()) {
  if(policy.authorizationMode!=='search-rules'||!grant?.enabled)return false;
  return (policy.individualContributorReviews||[]).some(r=>r.jobId===job.id&&r.postingKey===postingKey(job.url)&&r.jobSha256===digest({title:job.title,location:job.location,description:job.description})&&r.resumeSha256===grant.resumeSha256&&r.profileSha256===grant.profileSha256&&r.searchSha256===grant.searchSha256&&r.evidence?.trim()&&Date.parse(r.reviewedAt)<=at.getTime()&&at.getTime()-Date.parse(r.reviewedAt)<24*60*60*1000);
 }
+export function meetsContributorRule(job, policy, at = new Date()) {
+ return policy.requireICReview === false || /director|vice president|\bvp\b|head|chief/i.test(job.title) ||
+   individualContributorReviewed(job, policy, at);
+}
 export const dayAt = (date, timezone) => new Intl.DateTimeFormat('en-CA',{timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit'}).format(date);
 const questionLabel=value=>String(value).replace(/[*:]/g,'').replace(/\s+/g,' ').trim();
 export function postingKey(raw) {
@@ -36,7 +42,17 @@ export function postingKey(raw) {
 export function supportedPosting(url) {
  try{const u=new URL(url);return u.protocol==='https:'&&!u.username&&!u.password&&['job-boards.greenhouse.io','boards.greenhouse.io','jobs.ashbyhq.com','jobs.lever.co'].includes(u.hostname);}catch{return false;}
 }
-export function samePosting(a,b){try{return new URL(a).origin===new URL(b).origin&&postingKey(a)===postingKey(b);}catch{return false;}}
+export function samePosting(a,b){
+ try{
+  const left=new URL(a),right=new URL(b);
+  if(left.origin!==right.origin)return false;
+  if(['boards.greenhouse.io','job-boards.greenhouse.io'].includes(left.hostname)){
+   const job=greenhousePosting(a),other=greenhousePosting(b);
+   return !!job && !!other && job.key===other.key;
+  }
+  return postingKey(a)===postingKey(b);
+ }catch{return false;}
+}
 export function salaryForLocation(text,state) {
  const clean=String(text).replace(/\s+/g,' '),ranges=[];
  const pattern=/((?:(?:USA|US|United States)\s+)?(?:annual\s+)?base\s+(?:salary|pay|compensation)(?:\s+range)?[^$]{0,180})\$([\d,]+)\s*(?:-|–|—|to)\s*\$([\d,]+)(?=(.{0,55}))/gi;
@@ -111,13 +127,19 @@ export function answerFor(field,profile) {
  }
  return undefined;
 }
-export function fillPlan(form,profile,{postingKey:scope,company}={}) {
+export function fillPlan(form,profile,{postingKey:scope,company,inboxAnswer}={}) {
  if(scope||company)profile={...profile,scopePostingKey:scope,applyingCompany:company};
- const actions=[],missing=[];
+ const actions=[],missing=[],inboxValues=[];
  for(const field of form.fields){
   if(field.type==='file')continue;
   if(field.type==='select'&&/^(?:location(?: \(city\))?|current location|what location do you intend to work from\?)\*?$/i.test(field.label.trim()))field.locationKnown={city:profile.facts.city,state:profile.facts.state,stateCode:profile.facts.stateCode,country:profile.facts.country};
-  const value=answerFor(field,profile);
+  let value=answerFor(field,profile);
+  if(field.required && (value===undefined || value===null || value==='') && inboxAnswer) {
+   value=inboxAnswer(field);
+   if(value!==undefined && value!==null && value!=='') {
+    inboxValues.push({label:field.label,type:field.type,options:field.options||[],country:field.countryContext||'',value});
+   }
+  }
   if(value===undefined||value===null||value===''){if(field.required)missing.push(field.label);continue;}
   if(field.type==='number'&&!Number.isFinite(Number(value))){missing.push('Numeric answer required: '+field.label);continue;}
   const consent=(profile.answers||[]).find(a=>questionLabel(a.question)===questionLabel(field.label)&&a.verified&&['privacy-consent','application-attestation'].includes(a.kind)&&(!a.scopePostingKey||a.scopePostingKey===profile.scopePostingKey));
@@ -128,7 +150,7 @@ export function fillPlan(form,profile,{postingKey:scope,company}={}) {
  }
  if(!form.resume)missing.push('Supported resume upload');
  if(!form.submit)missing.push('Unambiguous final Submit application button');
- return {actions,missing};
+ return {actions,missing,...(inboxValues.length?{inboxAnswerSha256:digest(inboxValues)}:{})};
 }
 export class ApplicationStore {
  constructor(root){this.root=path.resolve(root);}
@@ -204,41 +226,73 @@ export async function configureStandingAuthorization({home,evidence,enabled=true
  const grant={id:randomUUID(),enabled:true,grantedAt:now().toISOString(),evidence:evidence.trim(),resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,searchSha256:ctx.searchSha256,maxPerDay:policy.maxPerDay,dailyBudgetUsd:policy.dailyBudgetUsd,timezone:policy.timezone};
  await store.write('application-policy.json',{...policy,authorizationMode:'search-rules',standingAuthorization:grant});return {enabled:true,grantId:grant.id};
 }
-function packetFromInspection(job,inspection,ctx,at) {
- const plan=fillPlan(inspection.form,ctx.profile,{postingKey:postingKey(job.url),company:job.company}),salary=inspectionSalary(inspection,ctx.profile.facts.stateCode);
+async function applicationFillPlan(store, job, form, ctx, adapter) {
+ const scope = {postingKey:postingKey(job.url),company:job.company};
+ if(adapter.transport==='playwright' && greenhousePosting(job.url)){
+  const state=await readGreenhouseAnswers(store);
+  scope.inboxAnswer=field=>greenhouseAnswerFor(state,{job,field,form,profileSha256:ctx.profileSha256});
+ }
+ return fillPlan(form,ctx.profile,scope);
+}
+async function packetFromInspection(store,job,inspection,ctx,at,adapter) {
+ const plan=await applicationFillPlan(store,job,inspection.form,ctx,adapter),salary=inspectionSalary(inspection,ctx.profile.facts.stateCode);
  const fit=evaluate({...job,location:inspection.location,compensation:salary},ctx.search);
  if(!inspection.titleVerified||inspection.closed||inspection.login||fit.disposition!=='match'||plan.missing.length)throw Error('Fresh draft requires review: '+[...fit.reasons,...plan.missing].join('; '));
  const packet={id:randomUUID(),job,tabId:inspection.tabId,createdAt:at.toISOString(),expiresAt:new Date(at.getTime()+60*60*1000).toISOString(),resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,searchSha256:ctx.searchSha256,formDigest:formDigest(inspection.form),salary,location:inspection.location,fields:plan.actions.map(a=>a.field.label),answersPreview:plan.actions.map(a=>({question:a.field.label,answer:a.value})),resumeFilename:path.basename(ctx.connections.resume)};
+ if(plan.inboxAnswerSha256)packet.inboxAnswerSha256=plan.inboxAnswerSha256;
  packet.digest=digest(packet);return packet;
 }
 /** Inspect only: no contact fields, uploads or final buttons are touched. */
 export async function prepareApplications({home,adapter,limit=15,jobIds,restartAuthorizationId,now=()=>new Date()}) {
  const store=new ApplicationStore(home),ctx=await prerequisites(store,now()),jobs=await store.read('jobs.json',[]),attempts=await store.read('application-ledger.json',[]);
  const hold=submissionHold(ctx.policy,adapter);if(hold)return {createdAt:now().toISOString(),packets:[],held:[{reason:hold==='review_only'?'Manual final submission: prepare local evidence packets instead':'Browser automation risk must be explicitly acknowledged'}]};
- const packets=[],held=[];
+ const packets=[],held=[],inspectedIds=new Set(),clearedQuestions=[];
  for(const job of jobs){
   if(jobIds&&!jobIds.includes(job.id))continue;
   if(packets.length>=Math.min(limit,ctx.policy.maxPerDay))break;
+  inspectedIds.add(job.id);
   const restart=await restartException(store,restartAuthorizationId,job,ctx,attempts,adapter,now());
   if(restartAuthorizationId&&!restart)continue;
   if(!supportedPosting(job.url)||!restart&&duplicate(job,ctx.history,attempts,ctx.reapplicationReviews)||['applied','dismissed','rejected'].includes(job.status))continue;
-  const quality=await qualityGate(store,ctx,job,undefined,adapter);if(!quality.ok){held.push({id:job.id,company:job.company,title:job.title,reason:'Application quality review required',questions:quality.reasons});continue;}
+  const quality=await qualityGate(store,ctx,job,undefined,adapter);if(!quality.ok){clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,reason:'Application quality review required',questions:quality.reasons});continue;}
   const preliminary=evaluate({...job,compensation:job.compensation||{min:ctx.search.minAnnualBaseUsd,currency:'USD',interval:'year'}},ctx.search);
   if(preliminary.reasons.some(r=>!['Annual USD base compensation needs verification','Location needs review'].includes(r)))continue;
-  if(!/director|vice president|\bvp\b|head|chief/i.test(job.title)&&ctx.policy.requireICReview!==false&&!individualContributorReviewed(job,ctx.policy,now())){held.push({id:job.id,company:job.company,title:job.title,reason:'Individual-contributor specialization requires review'});continue;}
+  if(!meetsContributorRule(job,ctx.policy,now())){clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,reason:'Individual-contributor specialization requires review'});continue;}
   let inspection;try{inspection=await adapter.inspect(job);}catch{held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Posting or form could not be inspected'});continue;}
-  if(!inspection.titleVerified||inspection.closed||inspection.login){held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Closed, sign-in required, or title mismatch'});continue;}
+  if(!inspection.titleVerified||inspection.closed||inspection.login){clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Closed, sign-in required, or title mismatch'});continue;}
   const pay=inspectionSalary(inspection,ctx.profile.facts.stateCode);
   const fit=evaluate({...job,location:inspection.location,compensation:pay},ctx.search);
-  if(fit.disposition!=='match'){held.push({id:job.id,company:job.company,title:job.title,reason:fit.reasons.join('; ')});continue;}
-  const plan=fillPlan(inspection.form,ctx.profile,{postingKey:postingKey(job.url),company:job.company});
-  if(plan.missing.length){held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Missing verified answers or supported controls',questions:plan.missing});continue;}
+  if(fit.disposition!=='match'){clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,reason:fit.reasons.join('; ')});continue;}
+  const plan=await applicationFillPlan(store,job,inspection.form,ctx,adapter);
+  if(plan.missing.length){
+   if(adapter.transport==='playwright'&&!restartAuthorizationId){
+    await observeGreenhouseQuestions({store,job,form:inspection.form,missing:plan.missing,profileSha256:ctx.profileSha256,channel:'worker'});
+   }
+   held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Missing verified answers or supported controls',questions:plan.missing});continue;}
   const packet={id:randomUUID(),job,tabId:inspection.tabId,createdAt:now().toISOString(),expiresAt:new Date(now().getTime()+60*60*1000).toISOString(),resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,searchSha256:ctx.searchSha256,formDigest:formDigest(inspection.form),salary:pay,location:inspection.location,fields:plan.actions.map(a=>a.field.label),answersPreview:plan.actions.map(a=>({question:a.field.label,answer:a.value})),resumeFilename:path.basename(ctx.connections.resume)};
+  if(plan.inboxAnswerSha256)packet.inboxAnswerSha256=plan.inboxAnswerSha256;
   if(restart)packet.restartAuthorizationId=restart.id;
   if(quality.qualitySha256)packet.qualitySha256=quality.qualitySha256;
   packet.digest=digest(packet);packets.push(packet);
  }
- const result={createdAt:now().toISOString(),packets,held};await store.write('application-plan.json',result);return result;
+ const result={createdAt:now().toISOString(),packets,held};
+ await store.lock(async()=>{
+  const previous=await store.read('application-plan.json',{packets:[],held:[]});
+  const ledger=await store.read('application-ledger.json',[]);
+  const reserved=new Set(ledger.filter(a=>a.status==='held'||a.status==='preparing').map(a=>a.packetDigest));
+  // Preserve independently approved packets and the original packet for an existing draft.
+  const retained=previous.packets.filter(p=>reserved.has(p.digest) ||
+    (!inspectedIds.has(p.job.id) && Date.parse(p.expiresAt)>now().getTime()));
+  await store.write('application-plan.json',{createdAt:result.createdAt,packets:[...retained,...packets],
+    held:[...previous.held.filter(h=>!inspectedIds.has(h.id)),...held]});
+ });
+ // Clear resolved preflight holds only after their new packets are durable.
+ if(adapter.transport==='playwright'&&!restartAuthorizationId){
+  for(const job of [...clearedQuestions,...packets.map(packet=>packet.job)]){
+   await observeGreenhouseQuestions({store,job,form:null,missing:[],profileSha256:ctx.profileSha256});
+  }
+ }
+ return result;
 }
 /** Executes only immutable, explicitly authorized packets. Exceptions after a submit click remain unknown forever until reconciled. */
 export async function runApplications({home,adapter,now=()=>new Date(),limit=15,resumeAttemptId,packetIds,shouldContinue=()=>true}) {
@@ -257,7 +311,7 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
    if(!standingAuthorizationMatches(ctx.policy,scope,adapter))throw Error('Fresh held draft requires current native standing authorization');
    const restart=job&&await restartException(store,held.restartAuthorizationId,job,ctx,ledger,adapter,now(),held.id);
    if(!job||job.listingState==='unlisted'||held.restartAuthorizationId&&!restart||['applied','dismissed','rejected'].includes(job.status)||!restart&&duplicate(job,ctx.history,ledger.filter(a=>a.id!==held.id),ctx.reapplicationReviews))throw Error('Held draft is no longer eligible');
-   const inspection=await adapter.inspect(job),fresh=packetFromInspection(job,inspection,ctx,now());
+   const inspection=await adapter.inspect(job),fresh=await packetFromInspection(store,job,inspection,ctx,now(),adapter);
    const freshQuality=await qualityGate(store,ctx,job,undefined,adapter);if(!freshQuality.ok)throw Error('Held draft needs evidence and track résumé review');if(freshQuality.qualitySha256){fresh.qualitySha256=freshQuality.qualitySha256;fresh.digest=digest(Object.fromEntries(Object.entries(fresh).filter(([k])=>k!=='digest')));}
    if(restart){fresh.restartAuthorizationId=restart.id;fresh.digest=digest(Object.fromEntries(Object.entries(fresh).filter(([k])=>k!=='digest')));}
    (held.draftRefreshes||=[]).push({at:now().toISOString(),previousPacketDigest:held.packetDigest,previousTabId:held.tabId,packetDigest:fresh.digest,grantId:ctx.policy.standingAuthorization.id});
@@ -284,9 +338,15 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
    if(!authorization){results.push({jobId:packet.job.id,status:'authorization_required'});continue;}
    const quality=await qualityGate(store,ctx,packet.job,packet,adapter);if(!quality.ok){results.push({jobId:packet.job.id,status:'quality_held',reasons:quality.reasons});continue;}
    if(resumed?.browserEvidence)adapter.restoreEvidence?.(packet.job.id,resumed.browserEvidence);
-   const inspection=await adapter.inspect(packet.job,{tabId:packet.tabId});
-   const fit=evaluate({...packet.job,location:inspection.location,compensation:inspectionSalary(inspection,ctx.profile.facts.stateCode)},ctx.search),actions=fillPlan(inspection.form,ctx.profile,{postingKey:key,company:packet.job.company});
-   if(!inspection.titleVerified||inspection.closed||inspection.login||fit.disposition!=='match'||authorization.mode!=='search-rules'&&formDigest(inspection.form)!==packet.formDigest||actions.missing.length){results.push({jobId:packet.job.id,status:'posting_or_form_changed'});continue;}
+   let inspection;
+   try{inspection=await adapter.inspect(packet.job,{tabId:packet.tabId});}
+   catch(error){
+    // Only an unstarted preflight may obtain a fresh packet after its preserved tab is lost.
+    if(resumed || restart || error.message!=='Preserved application page unavailable; no new form was opened')throw error;
+    results.push({jobId:packet.job.id,status:'posting_or_form_changed'});continue;
+   }
+   const fit=evaluate({...packet.job,location:inspection.location,compensation:inspectionSalary(inspection,ctx.profile.facts.stateCode)},ctx.search),actions=await applicationFillPlan(store,packet.job,inspection.form,ctx,adapter);
+   if(!inspection.titleVerified||inspection.closed||inspection.login||fit.disposition!=='match'||authorization.mode!=='search-rules'&&formDigest(inspection.form)!==packet.formDigest||actions.inboxAnswerSha256!==packet.inboxAnswerSha256||actions.missing.length){results.push({jobId:packet.job.id,status:'posting_or_form_changed'});continue;}
    const attempt=resumed||{id:randomUUID(),jobId:packet.job.id,company:packet.job.company,title:packet.job.title,url:packet.job.url,tabId:packet.tabId,postingKey:key,day,status:'preparing',createdAt:at.toISOString(),reservedCostUsd:cost,resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,packetDigest:packet.digest};attempt.authorization=authorization;
    if(restart){attempt.restartsAttemptId=restart.attemptId;attempt.restartAuthorizationId=restart.id;}
    if(resumed){attempt.status='preparing';attempt.reason=null;attempt.day=day;}else attempts.push(attempt);const save=async()=>{attempt.updatedAt=now().toISOString();await store.write('application-ledger.json',attempts);};await save();
@@ -295,12 +355,16 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
     let activeInspection=inspection,activeActions=actions.actions,check;
     for(let pass=0;pass<3;pass++){
      if(pass>0){const live=await prerequisites(store,now());if(!await shouldContinue()||!applicationAuthorization(live.policy,packet,adapter,await store.read('application-approvals.json',[]),now()))throw Error('Application authorization changed during conditional form handling');}
+     if(packet.inboxAnswerSha256){
+      const beforeFill=await applicationFillPlan(store,packet.job,activeInspection.form,ctx,adapter);
+      if(beforeFill.missing.length || beforeFill.inboxAnswerSha256!==packet.inboxAnswerSha256)throw Error('Inbox answers changed before fill');
+     }
      attempt.browserEvidence=await adapter.fill(activeInspection,activeActions,ctx.connections.resume);await save();
      check=await adapter.verify(activeInspection,activeActions,ctx.connections.resume);
      if(check.ok||authorization.mode!=='search-rules'||check.reason!=='Posting or form structure changed'||pass===2)break;
-     const fresh=await adapter.inspect(packet.job,{tabId:packet.tabId}),freshPlan=fillPlan(fresh.form,ctx.profile,{postingKey:key,company:packet.job.company});
+     const fresh=await adapter.inspect(packet.job,{tabId:packet.tabId}),freshPlan=await applicationFillPlan(store,packet.job,fresh.form,ctx,adapter);
      const freshFit=evaluate({...packet.job,location:fresh.location,compensation:inspectionSalary(fresh,ctx.profile.facts.stateCode)},ctx.search);
-     if(!fresh.titleVerified||fresh.closed||fresh.login||freshFit.disposition!=='match'||freshPlan.missing.length){check={ok:false,reason:'Conditional form requires review: '+freshPlan.missing.join('; ')};break;}
+     if(!fresh.titleVerified||fresh.closed||fresh.login||freshFit.disposition!=='match'||freshPlan.inboxAnswerSha256!==packet.inboxAnswerSha256||freshPlan.missing.length){check={ok:false,reason:'Conditional form requires review: '+freshPlan.missing.join('; ')};break;}
      (attempt.formRevisions||=[]).push({from:formDigest(activeInspection.form),to:formDigest(fresh.form),fields:freshPlan.actions.map(a=>a.field.label),at:now().toISOString(),authorizationGrantId:authorization.grantId});await save();activeInspection=fresh;activeActions=freshPlan.actions;
     }
     if(!check.ok||check.captcha||check.manual){attempt.status='held';attempt.reason=check.reason||'Readback, CAPTCHA or manual action required';await save();results.push({...attempt});continue;}
@@ -309,6 +373,12 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
     if(submissionHold(current.policy,adapter)||!(await qualityGate(store,current,packet.job,packet,adapter)).ok)throw Error('Submission mode or quality evidence changed');
     const currentAttempts=await store.read('application-ledger.json',[]),currentRestart=await restartException(store,packet.restartAuthorizationId,packet.job,current,currentAttempts,adapter,now(),attempt.id);
     if(current.resumeSha256!==packet.resumeSha256||current.profileSha256!==packet.profileSha256||current.searchSha256!==packet.searchSha256||!applicationAuthorization(current.policy,packet,adapter,await store.read('application-approvals.json',[]),now())||packet.restartAuthorizationId&&!currentRestart||!currentRestart&&duplicate(packet.job,current.history,currentAttempts.filter(a=>a.id!==attempt.id),current.reapplicationReviews))throw Error('Submission authorization or applicant state changed');
+    if(packet.inboxAnswerSha256){
+     const latest=await adapter.inspect(packet.job,{tabId:packet.tabId});
+     const finalPlan=await applicationFillPlan(store,packet.job,latest.form,current,adapter);
+     if(!latest.titleVerified || latest.closed || latest.login || latest.captcha || formDigest(latest.form)!==formDigest(activeInspection.form) ||
+        finalPlan.missing.length || finalPlan.inboxAnswerSha256!==packet.inboxAnswerSha256)throw Error('Inbox answers or employer form changed before submission');
+    }
     attempt.verificationCheckpoint=await adapter.captureVerificationCheckpoint?.(activeInspection);
     attempt.status='submission_unknown';await save(); // Durable BEFORE the only final click.
     await adapter.submit(activeInspection);

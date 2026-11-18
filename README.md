@@ -6,6 +6,8 @@ A local-first job-search workspace. Bring your own résumé, career history, sea
 
 After discovery, use the [employer shortlist and outcome report](rebuild/README.md#measure-employer-responses) to verify compensation for one track and track interview invitations against confirmed applications. A [daily macOS discovery schedule](docs/STANDALONE.md) can refresh the boards independently of the application worker.
 
+**Greenhouse decisions.** Open **Needs your input** on the local dashboard to answer a missing preflight question and choose where Mosaic may reuse it. The worker continues independently under the workspace’s existing permissions. [Using the inbox](rebuild/README.md#greenhouse-inbox)
+
 ## Quick start for a new applicant
 
 For forms and answers that need judgment, use the [Codex + Mosaic paired workflow](docs/CODEX_PAIRING.md). Unattended employer coverage remains experimental; passing fixtures does not prove a real employer accepted an application.

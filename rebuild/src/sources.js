@@ -1,3 +1,4 @@
+import {publicGreenhouseForm} from './greenhouse-public-form.js';
 import {ashbyLocation,nationwideUSRemote,requiresLocalResidence} from './location.js';
 import {htmlText} from './career.js';
 const allowed = new Set(['greenhouse', 'lever', 'ashby']);
@@ -86,7 +87,7 @@ export async function livePostingEvidence(job,fetcher=fetch,rules={}){
  }
  if(['job-boards.greenhouse.io','boards.greenhouse.io'].includes(url.hostname)){
   const id=parts[2];if(!/^\d+$/.test(id||''))return null;
-  const sourceUrl='https://boards-api.greenhouse.io/v1/boards/'+encodeURIComponent(slug)+'/jobs/'+id+'?pay_transparency=true';
+  const sourceUrl='https://boards-api.greenhouse.io/v1/boards/'+encodeURIComponent(slug)+'/jobs/'+id+'?pay_transparency=true'+(rules.includeQuestions?'&questions=true':'');
   const response=await fetcher(sourceUrl,{redirect:'error',signal:AbortSignal.timeout(10000)});if(!response.ok)return null;const j=await response.json();
   if(String(j.id)!==id)return null;
   const metadata=j.metadata||[],fullTime=metadata.some(m=>m.name==='Time Type'&&/^full[ -]?time$/i.test(m.value||'')),salaried=metadata.some(m=>m.name==='Pay Rate Type'&&m.value==='Salary');
@@ -104,7 +105,8 @@ export async function livePostingEvidence(job,fetcher=fetch,rules={}){
    pay={min:ranges[0].min_cents/100,max:ranges[0].max_cents/100,currency:'USD',interval:'year',periodAssumed:true,evidence:'Employer USD base-only range; applicant-authorized conventional annual-period assumption'};
   }
   if(!pay)pay=salaryFromText(j.content||'',{allowAnnualBaseAssumption:assumptionAllowed,location:j.location?.name});
-  return {title:j.title,location:listingLocation(j.location?.name||'',j.content),compensation:pay,posting:job.url,sourceUrl};
+  return {title:j.title,location:listingLocation(j.location?.name||'',j.content),compensation:pay,posting:job.url,sourceUrl,
+   ...(rules.includeQuestions?{publicForm:publicGreenhouseForm(j.questions)}:{})};
  }
  return null;
 }

@@ -1,8 +1,9 @@
+import {enrichGreenhouseFields} from './greenhouse-public-form.js';
 import path from 'node:path';
 import {mkdir,chmod,readFile} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {CodexBrowserAdapter} from './browser-adapter.js';
-import {digest,postingKey,supportedPosting} from './applications.js';
+import {digest,samePosting,supportedPosting} from './applications.js';
 import {optionForAnswer,sameAnswer} from './application-values.js';
 import {livePostingEvidence} from './sources.js';
 import {nationwideUSRemote,qualifiedUSRemote,requiresLocalResidence} from './location.js';
@@ -18,7 +19,7 @@ class NativeTabs {
  }
  async new(){return this.wrap(await this.context.newPage());}
  async get(id){const tab=this.byId.get(id);if(!tab||tab.page.isClosed())throw Error('Application tab unavailable; inspect the preserved session');return tab;}
- find(url){return this.context.pages().find(p=>{try{return !p.isClosed()&&new URL(p.url()).origin===new URL(url).origin&&postingKey(p.url())===postingKey(url);}catch{return false;}});}
+ find(url){return this.context.pages().find(p=>{try{return !p.isClosed()&&samePosting(p.url(),url);}catch{return false;}});}
 }
 
 export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
@@ -58,8 +59,9 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   if(new URL(job.url).hostname==='jobs.ashbyhq.com')inspection.description=overview;
   try{
    const rules=JSON.parse(await readFile(path.join(this.home,'search.json'),'utf8').catch(()=> '{}'));
-   const evidence=await this.evidenceLoader(job,undefined,{allowAnnualBaseAssumption:rules.allowAnnualBaseAssumption===true}),norm=s=>String(s).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+   const evidence=await this.evidenceLoader(job,undefined,{includeQuestions:true,allowAnnualBaseAssumption:rules.allowAnnualBaseAssumption===true}),norm=s=>String(s).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
    if(evidence&&norm(evidence.title)===norm(job.title)&&evidence.posting===job.url){
+    if (['boards.greenhouse.io','job-boards.greenhouse.io'].includes(new URL(job.url).hostname)) enrichGreenhouseFields(inspection.form.fields,evidence.publicForm);
     inspection.compensation=evidence.compensation;inspection.publicEvidence={posting:job.url,sourceUrl:evidence.sourceUrl,checkedAt:new Date().toISOString()};
     if(evidence.location&&nationwideUSRemote(inspection.location)&&!nationwideUSRemote(evidence.location))inspection.location=evidence.location;
     const listingText=applicationText+'\n'+overview,scoped=listingText.split(/\r?\n/).find(qualifiedUSRemote);
@@ -110,7 +112,11 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
  async fill(inspection,actions,resume){
   const tab=inspection.tab;
   await tab.page.bringToFront();
+  const checkDestination=()=>{
+   if(!samePosting(tab.page.url(),inspection.job.url))throw Error('Application destination changed');
+  };
   for(const {field,value} of actions){
+   checkDestination();
    this.lastControl=field.label;
    if(field.type!=='select'&&field.value&&sameAnswer(field,field.value,value))continue;
    const control=this.locator(tab,field);
@@ -137,6 +143,7 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
    }else if(['checkbox','manual','radio'].includes(field.type))throw Error('Manual control requires applicant review');
    else await control.fill(value);
   }
+  checkDestination();
   this.lastControl='Resume upload';
   if(!inspection.form.resume.attached){
    const input=this.locator(tab,inspection.form.resume);
@@ -149,6 +156,7 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
  }
  async submit(inspection){
   const page=inspection.tab.page;await page.bringToFront();
+  if(!samePosting(page.url(),inspection.job.url))throw Error('Application destination changed');
   const events=[];this.submissionEvidence={at:new Date().toISOString(),jobId:inspection.job.id,events};
   const record=(request,status)=>{try{const url=new URL(request.url());if(events.length<40&&['POST','PUT'].includes(request.method()))events.push({origin:url.origin,path:url.pathname,method:request.method(),status});}catch{}};
   const response=r=>record(r.request(),r.status()),failed=r=>record(r,'request_failed');page.on('response',response);page.on('requestfailed',failed);
@@ -159,7 +167,7 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   try{const result=await super.confirm(inspection,options);const emailVerificationPending=!result.confirmed&&await inspection.tab.page.evaluate(()=>Array.from({length:8},(_,n)=>document.getElementById('security-input-'+n)).every(e=>e&&e.getClientRects().length>0));return {...result,emailVerificationPending,transportEvidence:this.submissionEvidence?.jobId===inspection.job.id?this.submissionEvidence:undefined};}finally{this.clearSubmissionListeners?.();this.clearSubmissionListeners=null;}
  }
  preservedPage(attempt,{exact=false}={}){
-  const matches=p=>{try{return !p.isClosed()&&postingKey(p.url())===postingKey(attempt.url)&&new URL(p.url()).origin===new URL(attempt.url).origin;}catch{return false}};
+  const matches=p=>{try{return !p.isClosed()&&samePosting(p.url(),attempt.url);}catch{return false}};
   const remembered=this.nativeTabs.byId.get(attempt.tabId)?.page;
   if(remembered&&matches(remembered))return remembered;
   if(exact)return null;

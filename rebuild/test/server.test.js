@@ -12,6 +12,12 @@ test('local app serves state and refuses unauthorized writes',async()=>{
   const state=await fetch(url+'/api/state');assert.equal(state.status,200);const data=await state.json();assert.deepEqual(data.jobs,[]);assert.equal(data.submissionMode,'manual');
   assert.equal((await fetch(url+'/api/packet?id=../application-policy')).status,400);
   const html=await(await fetch(url)).text(),token=html.match(/const token='([^']+)'/)[1],headers={'Content-Type':'application/json','Origin':url,'X-Rolemosaic-Token':token};
+  const inbox=await(await fetch(url+'/api/inbox')).json();assert.deepEqual(inbox.items,[]);
+  assert.equal((await fetch(url+'/api/inbox/answer',{method:'POST',body:'{}'})).status,403);
+  assert.equal((await fetch(url+'/api/inbox/forget',{method:'POST',body:'{}'})).status,403);
+  assert.equal((await fetch(url+'/api/inbox/answer',{method:'POST',headers,body:JSON.stringify({scope:'future',answer:'Unscoped',confirm:true})})).status,400);
+  const stale=await fetch(url+'/api/inbox/answer',{method:'POST',headers,body:JSON.stringify({id:'missing',jobId:'none',scope:'posting',channel:'manual',revision:'a'.repeat(64),answer:'Example',confirm:true})});
+  assert.equal(stale.status,409);
   const prepared=await fetch(url+'/api/prepare-packets',{method:'POST',headers,body:'{}'});assert.equal(prepared.status,200);assert.equal((await prepared.json()).submissionMode,'manual');
   assert.equal((await fetch(url+'/api/submission-mode',{method:'POST',headers,body:JSON.stringify({mode:'automatic'})})).status,400);
 

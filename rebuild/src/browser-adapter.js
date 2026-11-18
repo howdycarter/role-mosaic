@@ -1,6 +1,6 @@
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { digest, formDigest, postingKey } from './applications.js';
+import { digest, formDigest, samePosting } from './applications.js';
 import { optionForAnswer, sameAnswer } from './application-values.js';
 import { nationwideUSRemote, qualifiedUSRemote, requiresLocalResidence } from './location.js';
 
@@ -38,14 +38,22 @@ export class CodexBrowserAdapter {
     const selected=e.closest('[class*="select__control"]')?.querySelector('[class*="single-value"], [class*="singleValue"]');
     const countryFlag=selected?.querySelector('[class*="iti__flag"]')?.className.match(/\biti__([a-z]{2})\b/)?.[1];
     const label=(labels.join(' ')||e.getAttribute('aria-label')||aria||parent?.querySelector('label')?.textContent||'').replace(/\s+/g,' ').trim();
-    return {id:e.id,label,triggerSelector:e.type==='file'&&e.id&&e.parentElement.querySelector('button')?e.parentElement.tagName.toLowerCase()+':has(> input#'+CSS.escape(e.id)+') > button':null,type:e.type==='file'?'file':e.tagName==='SELECT'||e.getAttribute('role')==='combobox'?'select':e.type||'text',required:e.required||e.getAttribute('aria-required')==='true'||/\*/.test(label),value:e.type==='file'?'':e.id==='country'&&countryFlag==='us'?'United States':e.value||selected?.textContent?.trim()||'',options:e.tagName==='SELECT'?[...e.options].map(o=>o.textContent.trim()):[]};
+    let description='';
+    if(['boards.greenhouse.io','job-boards.greenhouse.io'].includes(location.hostname)) {
+     const descriptions=(e.getAttribute('aria-describedby')||'').split(/\s+/).filter(Boolean)
+      .map(id=>document.getElementById(id)?.textContent?.trim()).filter(Boolean);
+     const help=parent?.querySelector('.field-description,.description,[data-testid="field-description"]')?.textContent?.trim();
+     if(help)descriptions.push(help);
+     description=[...new Set(descriptions)].join(' ');
+    }
+    return {id:e.id,label,...(description?{description}:{}),triggerSelector:e.type==='file'&&e.id&&e.parentElement.querySelector('button')?e.parentElement.tagName.toLowerCase()+':has(> input#'+CSS.escape(e.id)+') > button':null,type:e.type==='file'?'file':e.tagName==='SELECT'||e.getAttribute('role')==='combobox'?'select':e.type||'text',required:e.required||e.getAttribute('aria-required')==='true'||/\*/.test(label),value:e.type==='file'?'':e.id==='country'&&countryFlag==='us'?'United States':e.value||selected?.textContent?.trim()||'',options:e.tagName==='SELECT'?[...e.options].map(o=>o.textContent.trim()):[]};
    });
    const buttons=[...document.querySelectorAll('button,input[type="submit"]')].filter(e=>e.getClientRects().length>0).map(e=>({label:(e.innerText||e.value||e.getAttribute('aria-label')||'').trim(),id:e.id}));
    const heading=[...document.querySelectorAll('h1,h2')].map(e=>e.textContent.trim());
    return {url:location.href,title:document.title,headings:heading,text,main,fields,buttons};
   });
   for(const field of view.fields){const evidence=this.verifiedReadbacks[job.id]?.[field.id];if(field.value==='<redacted>'&&evidence?.value&&evidence?.evidence){field.value=evidence.value;field.readbackEvidence=evidence.evidence;}}
-  if(new URL(view.url).origin!==new URL(job.url).origin||postingKey(view.url)!==postingKey(job.url))throw Error('Browser tab is no longer on the intended posting');
+  if(!samePosting(view.url,job.url))throw Error('Browser tab is no longer on the intended posting');
   const norm=s=>s.toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
   const titleVerified=view.headings.some(h=>norm(h)===norm(job.title));
   const location=postingLocation(view.main);
@@ -112,7 +120,7 @@ export class CodexBrowserAdapter {
   do{
    const text=String(await inspection.tab.ax.get('state',{disableDiffing:true}));
    const page=await inspection.tab.playwright.evaluate(()=>({url:location.href,hasInputs:[...document.querySelectorAll('input,textarea,select')].some(e=>e.type!=='hidden'&&e.type!=='file'&&e.getAttribute('aria-hidden')!=='true'&&e.getClientRects().length>0),hasSubmit:[...document.querySelectorAll('button,input[type="submit"]')].some(e=>e.getClientRects().length>0&&/^(submit(?: application)?|send application)$/i.test((e.innerText||e.value||'').trim()))}));
-   const confirmed=new URL(page.url).origin===new URL(inspection.job.url).origin&&postingKey(page.url)===postingKey(inspection.job.url)&&!page.hasInputs&&!page.hasSubmit&&/your application (?:was successfully submitted|has been (?:received|submitted))|thank you for (?:applying|your application)|application submitted successfully/i.test(text)&&! /\b(?:error|please complete|required field)\b/i.test(text);
+   const confirmed=samePosting(page.url,inspection.job.url)&&!page.hasInputs&&!page.hasSubmit&&/your application (?:was successfully submitted|has been (?:received|submitted))|thank you for (?:applying|your application)|application submitted successfully/i.test(text)&&! /\b(?:error|please complete|required field)\b/i.test(text);
    if(confirmed){
     const directory=path.join(this.home,'receipts');await mkdir(directory,{recursive:true,mode:0o700});
     const screenshot=path.join(directory,inspection.job.id+'.png');await writeFile(screenshot,await inspection.tab.screenshot({fullPage:false}),{mode:0o600});

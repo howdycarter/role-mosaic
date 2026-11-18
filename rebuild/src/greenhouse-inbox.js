@@ -1,0 +1,297 @@
+// Private, local grants for questions actually observed on a Greenhouse form.
+import { randomUUID } from 'node:crypto';
+import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { digest } from './applications.js';
+
+const filename = 'greenhouse-inbox.json';
+const emptyState = () => ({ version: 1, observations: [], grants: [] });
+const hosts = new Set(['boards.greenhouse.io', 'job-boards.greenhouse.io']);
+const supported = new Set(['text', 'textarea', 'number', 'select', 'email', 'tel', 'url']);
+const scopes = ['posting', 'employer', 'future'];
+
+// Cross-employer reuse is opt-in and limited to an exact, single-purpose
+// question. A question's wording, choices, control type and help must match.
+const portable = /^(?:(?:what is your |your )?(?:notice period|preferred name)|when (?:can|could) you start|when are you (?:available|free) to start|(?:which|what) languages (?:do you speak fluently|are you fluent in)|portfolio (?:url|website|link)|(?:your )?linkedin (?:profile|url|profile url))\??$/i;
+const employerHistory = /^(?:have you (?:ever |previously )?(?:worked (?:for|at)|been employed (?:by|at)) .+?|are you (?:currently )?employed (?:by|at) .+?)\??$/i;
+const manual = /\b(?:captcha|recaptcha|password|passphrase|passcode|otp|token|pin code|verification code|security code|authentication code|social security|ssn|tax identification|national id|passport|driver.s licen[cs]e number|bank account|routing number|credit card|debit card|signature|sign electronically|attest|attestation|consent|certify|arbitration|agree|agreement|terms of (?:use|service)|authorization to|background check|criminal|disability|disabled|veteran|racial|race|ethnic|hispanic|gender|transgender|sexual orientation|religion|medical history|human verification|human check|verification challenge|not a robot|api key|secret key|security question|recovery code|backup code|cryptographic key)\b|type (?:your|my) (?:full |legal )?name|one[- ]time (?:code|password)|verify (?:that )?you are human/i;
+const normalize = value => String(value ?? '').replace(/\s+/g, ' ').trim();
+
+export function greenhousePosting(raw) {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:' || !hosts.has(url.hostname) || url.port || url.username || url.password) return null;
+    const match = /^\/([a-z0-9_-]+)\/jobs\/(\d+)(?:\/(application|confirmation))?\/?$/i.exec(url.pathname);
+    const queryIds = url.searchParams.getAll('gh_jid');
+    if (!match || queryIds.some(id => id !== match[2])) return null;
+    return { board: match[1], id: match[2], confirmation: match[3]?.toLowerCase() === 'confirmation', key: match[1] + '/' + match[2], url: url.origin + '/' + match[1] + '/jobs/' + match[2] };
+  } catch { return null; }
+}
+
+function applicationPosting(raw) {
+  const posting = greenhousePosting(raw);
+  return posting && !posting.confirmation ? posting : null;
+}
+
+function question(field, form) {
+  if (!field || !field.required || !supported.has(field.type)) return null;
+  const label = normalize(field.label).replace(/\s*\*+$/, '').trim();
+  const help = normalize(field.description || field.helpText || '');
+  if (!label || label.length > 500 || help.length > 1200 || manual.test(label + ' ' + help)) return null;
+  if (!Array.isArray(form?.fields) || form.fields.filter(f => normalize(f.label).replace(/\s*\*+$/, '').trim() === label).length !== 1) return null;
+  let options = [];
+  if (field.type === 'select') {
+    if (!Array.isArray(field.options) || field.options.length > 300 || field.options.some(x => typeof x !== 'string' || x.length > 400)) return null;
+    options = field.options.filter(x => x.trim() && !/^select(?: an? option)?[.…]*$/i.test(x.trim()));
+    if (options.length === 0 || new Set(options.map(x => normalize(x).toLowerCase())).size !== options.length) return null;
+  }
+  const key = digest([label, help, field.type, options, true]);
+  const wording = label;
+  let allowed = ['posting'];
+  if (!help && portable.test(wording)) allowed = scopes;
+  else if (!help && employerHistory.test(wording) && !/\b(?:and|or|this (?:role|position)|if so|if yes)\b/i.test(wording)) allowed = ['posting', 'employer'];
+  return { key, label, type: field.type, options, scopes: allowed, ...(help ? { help } : {}) };
+}
+
+function formStamp(job, form) {
+  return digest([job.title, form.fields.map(f => [f.id || '', f.type, normalize(f.label), normalize(f.description || f.helpText),
+    !!f.required, Array.isArray(f.options) ? f.options : []])]);
+}
+
+function validValue(q, value) {
+  if (typeof value !== 'string' || !value.trim() || value.length > 5000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) return false;
+  if (q.type === 'select') return q.options.includes(value);
+  if (q.type === 'number') return /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value) && Number.isFinite(Number(value));
+  if (q.type === 'email') return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+  if (q.type === 'url') {
+    try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password; }
+    catch { return false; }
+  }
+  return true;
+}
+
+function target(scope, observation) {
+  if (scope === 'posting') return observation.key + ':' + observation.stamp;
+  if (scope === 'employer') return observation.board;
+  return '*';
+}
+
+function grantFor(state, observation, q) {
+  // More specific authorizations take precedence over a general one.
+  for (const scope of q.scopes) {
+    const match = state.grants.find(g => g.scope === scope && g.profileSha256 === observation.profileSha256 &&
+      g.questionKey === q.key && g.target === target(scope, observation) && validValue(q, g.answer));
+    if (match) return match;
+  }
+  return null;
+}
+
+// A short filesystem ticket lock covers only inbox read/modify/write. Unique
+// ticket names let a later process discard a dead writer without unlinking a
+// newer owner's lock. A choosing marker closes the race between two issuers.
+async function withInboxLock(store, work) {
+  const directory = path.join(store.root, 'greenhouse-inbox-writers');
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const owner = process.pid + '-' + randomUUID();
+  let ownFile = 'choosing-' + owner;
+  await writeFile(path.join(directory, ownFile), '', { flag: 'wx', mode: 0o600 });
+  try {
+    const files = await readdir(directory);
+    const highest = files.reduce((max, file) => {
+      const ticket = /^(\d{16})-/.exec(file);
+      return ticket ? Math.max(max, Number(ticket[1])) : max;
+    }, 0);
+    const ticket = String(highest + 1).padStart(16, '0') + '-' + owner;
+    await rename(path.join(directory, ownFile), path.join(directory, ticket));
+    ownFile = ticket;
+    const deadline = performance.now() + 3000;
+    for (;;) {
+      let blocked = false;
+      for (const other of await readdir(directory)) {
+        if (!other.startsWith('choosing-') && other >= ticket) continue;
+        const match = /^(?:choosing|\d{16})-(\d+)-[a-f0-9-]{36}$/.exec(other);
+        if (!match) continue;
+        try {
+          process.kill(Number(match[1]), 0);
+          blocked = true;
+        } catch (e) {
+          if (e.code === 'ESRCH') await rm(path.join(directory, other), { force: true });
+          else if (e.code === 'EPERM') blocked = true;
+          else throw e;
+        }
+      }
+      if (!blocked) return await work();
+      if (performance.now() >= deadline) throw Error('Another Greenhouse inbox update is busy. Retry shortly.');
+      await delay(20);
+    }
+  } finally {
+    await rm(path.join(directory, ownFile), { force: true });
+  }
+}
+
+export async function readGreenhouseAnswers(store) {
+  const state = await store.read(filename, emptyState());
+  if (state?.version !== 1 || !Array.isArray(state.observations) || !Array.isArray(state.grants)) throw Error('Unrecognized private Greenhouse inbox format');
+  return state;
+}
+
+export function greenhouseAnswerFor(state, { job, field, form, profileSha256 }) {
+  const posting = applicationPosting(job?.url);
+  if (!posting || !state?.grants?.length) return undefined;
+  const q = question(field, form);
+  if (!q) return undefined;
+  return grantFor(state, { ...posting, profileSha256, stamp: formStamp(job, form) }, q)?.answer;
+}
+
+export async function observeGreenhouseQuestions({ store, job, form, missing, profileSha256, channel = 'worker' }) {
+  const posting = applicationPosting(job?.url);
+  if (!posting || !job.id || !Array.isArray(missing) || !['worker', 'manual'].includes(channel)) return;
+  const labels = new Set(missing);
+  const questions = (form?.fields || []).filter(field => labels.has(field.label))
+    .map(field => question(field, form)).filter(Boolean);
+  // An unsupported control is never answered by inventing a value. It can
+  // still independently hold a posting after the answerable items are saved.
+  const observation = questions.length ? {
+    ...posting, jobId: job.id, company: job.company, title: job.title, channel, profileSha256,
+    stamp: formStamp(job, form), questions, otherBlockers: [...labels].some(label => !questions.some(q => q.label === normalize(label).replace(/\s*\*+$/, '').trim())),
+  } : null;
+  await withInboxLock(store, async () => {
+    if (await activeProfileHash(store) !== profileSha256) return;
+    const state = await readGreenhouseAnswers(store);
+    const index = state.observations.findIndex(o => o.key === posting.key && o.channel === channel);
+    if (index === -1 && !observation) return;
+    if (index !== -1 && JSON.stringify(state.observations[index]) === JSON.stringify(observation)) return;
+    if (index !== -1) state.observations.splice(index, 1);
+    if (observation) state.observations.push(observation);
+    await store.write(filename, state);
+  });
+}
+
+async function activeProfileHash(store) {
+  const [profile, policy] = await Promise.all([
+    store.read('application-profile.json', null), store.read('application-policy.json', {}),
+  ]);
+  if (!profile?.verified) return null;
+  const hash = digest(profile);
+  return policy.verifiedProfileSha256 && policy.verifiedProfileSha256 !== hash ? null : hash;
+}
+
+async function liveObservations(store, state, profileSha256) {
+  if (!profileSha256 || state.observations.length === 0) return [];
+  const [ledger, jobs] = await Promise.all([store.read('application-ledger.json', []), store.read('jobs.json', null)]);
+  const startedIds = new Set(), startedKeys = new Set(), legacyKeys = new Set();
+  for (const attempt of ledger) {
+    if (attempt.status === 'preflight_hold') continue;
+    startedIds.add(attempt.jobId);
+    const key = greenhousePosting(attempt.url)?.key;
+    if (key) startedKeys.add(key);
+    else if (attempt.postingKey) legacyKeys.add(attempt.postingKey);
+  }
+  const knownJobs = jobs && new Map(jobs.map(job => [job.id, job]));
+  return state.observations.filter(o => {
+    if (o.profileSha256 !== profileSha256 || startedIds.has(o.jobId) || startedKeys.has(o.key) ||
+        legacyKeys.has('greenhouse:' + o.id)) return false;
+    if (!knownJobs) return true;
+    const job = knownJobs.get(o.jobId);
+    return job && applicationPosting(job.url)?.key === o.key && job.title === o.title &&
+      job.listingState !== 'unlisted' && !['applied', 'dismissed', 'rejected', 'interview', 'offer'].includes(job.status);
+  });
+}
+
+function groupId(state, o, q) {
+  const widest = q.scopes.at(-1);
+  const revision = state.revisions?.[o.profileSha256 + ':' + q.key] || 0;
+  return digest([o.profileSha256, q.key, widest, target(widest, o), revision]);
+}
+
+function advanceRevision(state, profileSha256, questionKey) {
+  state.revisions ??= {};
+  const key = profileSha256 + ':' + questionKey;
+  state.revisions[key] = (state.revisions[key] || 0) + 1;
+}
+
+function summarize(state, observations) {
+  const groups = new Map(), waiting = new Set(), ready = new Set();
+  for (const o of observations) {
+    let hasMissing = false;
+    for (const q of o.questions) {
+      if (grantFor(state, o, q)) continue;
+      hasMissing = true;
+      const id = groupId(state, o, q);
+      if (!groups.has(id)) groups.set(id, { id, label: q.label, type: q.type, options: q.options, scopes: q.scopes, help: q.help, postings: [] });
+      const choices = groups.get(id).postings;
+      if (!choices.some(p => p.jobId === o.jobId && p.channel === o.channel)) {
+        choices.push({ jobId: o.jobId, company: o.company, title: o.title, url: o.url, channel: o.channel, revision: o.stamp });
+      }
+    }
+    if (o.channel !== 'worker') continue;
+    if (hasMissing) waiting.add(o.jobId);
+    else if (!o.otherBlockers) ready.add(o.jobId);
+  }
+  return { items: [...groups.values()], waitingJobIds: [...waiting], readyJobIds: [...ready] };
+}
+
+export async function readGreenhouseInbox(store) {
+  const state = await readGreenhouseAnswers(store);
+  const profileSha256 = await activeProfileHash(store);
+  const savedAnswers = state.grants.filter(g => g.profileSha256 === profileSha256).map(g => ({
+    id: g.id, label: g.label, scope: g.scope, company: g.company, title: g.title, confirmedAt: g.confirmedAt,
+  }));
+  return { ...summarize(state, await liveObservations(store, state, profileSha256)), savedAnswers };
+}
+
+export async function greenhouseRetryJobs(store) {
+  return (await readGreenhouseInbox(store)).readyJobIds;
+}
+
+export async function answerGreenhouseQuestion({ store, id, jobId, scope, answer, confirm, channel, revision }) {
+  if (confirm !== true) throw Error('Explicitly confirm that this answer is accurate for the selected scope');
+  return withInboxLock(store, async () => {
+    const state = await readGreenhouseAnswers(store);
+    const profileSha256 = await activeProfileHash(store);
+    const observations = await liveObservations(store, state, profileSha256);
+    const candidates = observations.filter(o => o.jobId === jobId && (!channel || o.channel === channel) && (!revision || o.stamp === revision))
+      .map(o => ({ o, q: o.questions.find(q => groupId(state, o, q) === id) })).filter(row => row.q);
+    if (!candidates.length) {
+      // Retrying the same accepted request is harmless. A stale browser tab
+      // cannot subsequently expand its grant or recreate a revoked answer.
+      const previous = state.grants.find(g => g.profileSha256 === profileSha256 && g.requestId === id &&
+        g.sourceJobId === jobId && g.scope === scope && g.answer === answer && (!channel || g.channel === channel));
+      if (previous) return { jobIds: [] };
+      throw Error('This Greenhouse question is stale or the posting is no longer actionable');
+    }
+    const { o, q } = candidates[0];
+    if (!q.scopes.includes(scope)) throw Error('This scope is unavailable for the selected question');
+    if (candidates.some(row => target(scope, row.o) !== target(scope, o))) throw Error('Choose the specific manual or worker observation before saving this answer');
+    if (!validValue(q, answer)) throw Error('Enter a valid answer for the observed field and choices');
+    const binding = target(scope, o);
+    const existing = state.grants.find(g => g.scope === scope && g.profileSha256 === o.profileSha256 &&
+      g.questionKey === q.key && g.target === binding);
+    if (existing && existing.answer !== answer) throw Error('An answer was already saved for this scope. Refresh the inbox.');
+    if (!existing) {
+      state.grants.push({ id: randomUUID(), requestId: id, label: q.label, company: o.company, title: o.title,
+        profileSha256: o.profileSha256, questionKey: q.key, scope, target: binding, answer,
+        sourceJobId: o.jobId, channel: o.channel, confirmedAt: new Date().toISOString() });
+      advanceRevision(state, o.profileSha256, q.key);
+      await store.write(filename, state);
+    }
+    const applicable = observations.filter(other => other.channel === 'worker' && !other.otherBlockers &&
+      other.questions.every(item => grantFor(state, other, item)) && other.questions.some(item =>
+        item.key === q.key && target(scope, other) === binding));
+    return { jobIds: [...new Set(applicable.map(other => other.jobId))] };
+  });
+}
+
+
+export async function forgetGreenhouseAnswer({ store, id }) {
+  return store.lock(() => withInboxLock(store, async () => {
+    const active = await activeProfileHash(store), state = await readGreenhouseAnswers(store);
+    const index = state.grants.findIndex(g => g.id === id && g.profileSha256 === active);
+    if (index === -1) throw Error('This saved answer is no longer available in this profile');
+    const [removed] = state.grants.splice(index, 1);
+    advanceRevision(state, removed.profileSha256, removed.questionKey);
+    await store.write(filename, state);
+    return { forgotten: true };
+  }));
+}
