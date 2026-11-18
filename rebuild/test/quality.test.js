@@ -21,6 +21,7 @@ test('evidence requires exact verified source quotes and detects changed sources
 test('FDE has its own track and never inherits an engineering resume or evidence',async()=>{
  const {roleTrack,assessQuality}=await import('../src/quality.js');
  for(const title of ['Forward Deployed Engineer','Forward-Deployed AI Engineer','Senior FDE','Senior Forward Deployed Infrastructure Engineer','Engineering Manager, Forward Deployed (Platform)'])assert.equal(roleTrack(title),'fde');
+ assert.equal(roleTrack('Principal Technical Program Manager, Forward Deployed Engineering'),null);
  assert.equal(roleTrack('FDE Recruiter'),null);assert.equal(roleTrack('Forward Deployed AI Accelerator, Marketing'),null);assert.equal(roleTrack('Director, Forward Deployed Sales Engineer'),null);assert.equal(roleTrack('FDE Product Manager'),'product');
  const q=assessQuality({title:'Senior Forward Deployed Engineer',description:'Customer-facing production engineering'}, {facts:[{id:'engineering',tracks:['engineering'],capabilities:[]}],caseStudies:[],digest:'source'}, {resume:{track:'engineering',status:'approved',sha256:'old'}});
  assert.equal(q.ready,false);assert.ok(q.reasons.includes('No source-backed evidence for this track'));assert.equal(q.resume.track,'engineering');

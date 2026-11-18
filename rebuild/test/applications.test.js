@@ -103,6 +103,14 @@ test('plan is read-only; only explicit packet authorization enables fill and sub
   assert.equal((await f.run())[0].status,'duplicate_held');assert.deepEqual(f.events,['fill','submit']);
  }finally{await f.close();}
 });
+test('a source withdrawal after authorization holds the cached plan before filling',async()=>{
+ const f=await fixture();try{
+  await f.prepare();await f.authorize();
+  await f.store.write('jobs.json',[{...f.job,listingState:'unlisted'}]);
+  const result=(await f.run())[0];assert.equal(result.status,'quality_held');
+  assert.match(result.reasons.join(' '),/no longer listed/);assert.deepEqual(f.events,[]);
+ }finally{await f.close();}
+});
 test('standing search authorization submits natively without inventing per-job approval and cannot authorize the Codex adapter',async()=>{
  const f=await fixture();try{await f.prepare();await configureStandingAuthorization({home:f.root,evidence:'Applicant explicitly enabled automatic matching applications',now});
  assert.equal((await f.run())[0].status,'authorization_required');f.adapter.transport='playwright';await f.prepare();

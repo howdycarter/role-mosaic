@@ -6,6 +6,7 @@ export const tracks=['product','design','engineering','fde'];
 export function roleTrack(title){
  if(/talent acquisition|people partners?|human resources|\b(?:legal|counsel|attorney|recruiting|recruiter|product marketing|sales engineering|sales engineer|gtm engineering)\b/i.test(title))return null;
  const deployed=/\bforward[\s-]+deployed\b/i.test(title),acronym=/\bfde\b/i.test(title),nonEngineering=/\b(?:marketing|account executive|business development|sales development|product manager|product management|designer|design)\b/i.test(title);
+ if((deployed||acronym)&&/\b(?:program|project) (?:managers?|management|directors?)\b/i.test(title))return null;
  if(!nonEngineering&&(deployed&&/\b(?:engineer|engineers|engineering)\b/i.test(title)||acronym))return 'fde';
  if(/\b(design|designer|ux|user experience)\b/i.test(title))return 'design';
  if(/\b(engineering|engineer|cto)\b/i.test(title))return 'engineering';

@@ -2,6 +2,8 @@ import {readFile} from 'node:fs/promises';
 import path from 'node:path';
 import {ApplicationStore,digest,postingKey,samePosting} from './applications.js';
 
+import {confirmedReceipt} from './outcomes.js';
+
 /** A campaign target counts employer receipts, independently of daily limits. */
 export async function campaignProgress({home}) {
  const store=new ApplicationStore(home),config=await store.read('campaign.json',null);
@@ -9,10 +11,9 @@ export async function campaignProgress({home}) {
  if(!Number.isInteger(config.targetConfirmed)||config.targetConfirmed<1||config.targetConfirmed>10000||!Number.isFinite(Date.parse(config.since)))throw Error('Invalid campaign target or starting timestamp');
  const ledger=await store.read('application-ledger.json',[]),confirmed=new Set(),unknown=new Set();
  for(const attempt of ledger){
-  if(!Number.isFinite(Date.parse(attempt.createdAt))||Date.parse(attempt.createdAt)<Date.parse(config.since))continue;
-  const key=postingKey(attempt.url);
-  if(attempt.status==='submitted'&&attempt.receipt?.confirmed===true&&attempt.receipt.text&&samePosting(attempt.receipt.posting,attempt.url))confirmed.add(key);
-  else if(attempt.status==='submission_unknown')unknown.add(key);
+  const receipt=confirmedReceipt(attempt);
+  if(receipt && receipt.time>=Date.parse(config.since))confirmed.add(receipt.key);
+  else if(attempt.status==='submission_unknown' && Date.parse(attempt.finalActionAt??attempt.createdAt)>=Date.parse(config.since) && samePosting(attempt.url,attempt.url))unknown.add(postingKey(attempt.url));
  }
  for(const source of config.importedReceipts||[]){
   const bytes=await readFile(path.resolve(home,source.file));

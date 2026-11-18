@@ -2,7 +2,9 @@
 
 A local-first job-search workspace. Bring your own résumé, career history, search rules, employer boards, and application records. Applicant data stays in your private local workspace and is not included in this repository.
 
-**Start with the independent rebuild in [`rebuild/`](rebuild/README.md).** The default is research and local evidence-packet preparation with **manual final submission**. Product, design and engineering use separate résumé registrations; source quotes and role-specific requirement reviews prevent a title match from being presented as proof of qualification. Browser automation can be detected. Experimental automatic execution requires explicit opt-in and additional evidence, résumé and authorization checks. Requires Node.js 22+ and no JEV/OpenRouter or AI subscription. Builds, tests and services run locally; no GitHub Actions or Vercel deployment. See [application quality](docs/APPLICATION_QUALITY.md).
+**Start with the independent rebuild in [`rebuild/`](rebuild/README.md).** The default is research and local evidence-packet preparation with **manual final submission**. Product, design, engineering and forward-deployed engineering use separate résumé registrations; source quotes and role-specific requirement reviews prevent a title match from being presented as proof of qualification. Browser automation can be detected. Experimental automatic execution requires explicit opt-in and additional evidence, résumé and authorization checks. Requires Node.js 22+ and no JEV/OpenRouter or AI subscription. Builds, tests and services run locally; no GitHub Actions or Vercel deployment. See [application quality](docs/APPLICATION_QUALITY.md).
+
+After discovery, use the [employer shortlist and outcome report](rebuild/README.md#measure-employer-responses) to verify compensation for one track and track interview invitations against confirmed applications. A [daily macOS discovery schedule](docs/STANDALONE.md) can refresh the boards independently of the application worker.
 
 ## Quick start for a new applicant
 

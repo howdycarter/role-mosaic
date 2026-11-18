@@ -35,6 +35,41 @@ node scripts/install-local-service.mjs --install
 
 Set the same `ROLEMOSAIC_HOME` and `PORT` before installing if customized. Prefer a workspace under `~/Library/Application Support/RoleMosaic/` for a Mac login service; macOS may restrict background access to Documents. The installer builds a local runtime copy in Application Support and installs `com.rolemosaic.local` in your user's LaunchAgents folder. No private applicant state is included in that runtime copy. It runs after GUI login and restarts the local server; it does not prevent sleep. Private logs are in `service.log` in the workspace. Stop it with `launchctl bootout gui/$(id -u)/com.rolemosaic.local`. To restart an installed service, use `launchctl kickstart -k gui/$(id -u)/com.rolemosaic.local`. To update its runtime, run local verification, then invoke the installer with **both `--install --update`** and the same workspace/port environment. Updates refuse an active application/worker lock and preserve the old service file. Avoid restarting during a submission; preserve and reconcile uncertain outcomes.
 
+### Schedule public-board discovery each day
+
+A separate, optional macOS login agent runs public-board discovery at a local wall-clock time. It uses the same scan as **Refresh job boards**, with a maximum of four requests in flight. It reads the configured boards and writes saved listings and scan health. The application worker and its submission settings are independent.
+
+After updating the dashboard runtime, obtain its installed paths and preview the schedule from the repository root:
+
+```bash
+service_plist="$HOME/Library/LaunchAgents/com.rolemosaic.local.plist"
+dashboard_script="$(plutil -extract ProgramArguments.1 raw "$service_plist")"
+runtime="$(dirname "$(dirname "$dashboard_script")")"
+workspace="$(plutil -extract EnvironmentVariables.ROLEMOSAIC_HOME raw "$service_plist")"
+node scripts/daily-discovery.mjs --runtime "$runtime" --home "$workspace" --time 08:00
+```
+
+To enable this time, write the reviewed plist and register it under your logged-in account:
+
+```bash
+node scripts/daily-discovery.mjs --runtime "$runtime" --home "$workspace" --time 08:00 --write
+discovery_plist="$HOME/Library/LaunchAgents/com.rolemosaic.discovery.plist"
+plutil -lint "$discovery_plist"
+launchctl bootstrap "gui/$(id -u)" "$discovery_plist"
+launchctl print "gui/$(id -u)/com.rolemosaic.discovery"
+```
+
+The agent runs at the next scheduled time. macOS coalesces calendar events missed during sleep on wake. A powered-off Mac or logged-out account can miss a day. [Apple’s timed jobs guide](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/ScheduledJobs.html) describes wake and power-off behavior. Inspect **Latest board scan** on the dashboard. The private workspace also contains `discovery-state.json` with the last attempt, last fully successful scan time and per-board results, and `discovery.log` with the scheduled command output. The dashboard reports the latest board scan from any entry point. `launchctl print` shows the calendar job's own run count and last exit code.
+
+Listings absent from a successfully read board become unlisted. A source error leaves its prior listings intact. An all-source failure preserves saved jobs and exits nonzero. Run a one-off catch-up with `ROLEMOSAIC_HOME="$workspace" node "$runtime/src/discovery.js"`.
+
+To retire the schedule permanently, unload it and move the plist out of LaunchAgents. These commands also prepare a runtime or schedule change. The generator refuses to overwrite an existing plist. After a dashboard release update, repeat the preview and enable steps using the updated paths.
+
+```bash
+launchctl bootout "gui/$(id -u)/com.rolemosaic.discovery"
+mv "$discovery_plist" "$workspace/discovery-schedule-$(date +%Y%m%d-%H%M%S).plist"
+```
+
 ## Local verification and publication
 
 From the root, run `npm run verify:local`. This runs typecheck, legacy/rebuild tests, real Chrome/Chromium tests against isolated synthetic employer forms, privacy checks and both dependency audits locally. Install rebuild dependencies first. Tests never submit to an actual employer. There are no automatic GitHub Actions workflows and no Vercel deployment. Review staged files before pushing; never commit a browser profile, token, applicant export, résumé or receipt.

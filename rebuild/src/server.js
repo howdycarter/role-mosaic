@@ -1,9 +1,10 @@
+import {confirmedReceipt,recordOutcome,summarizeOutcomes} from './outcomes.js';
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { home,read,write } from './store.js';
-import { evaluate,historyMatch } from './core.js';
+import { evaluate,createHistoryLookup } from './core.js';
 import { starterSearch } from './onboarding.js';
 import { approvePackets,configureStandingAuthorization } from './applications.js';
 import {MosaicWorker} from './worker.js';
@@ -35,7 +36,13 @@ const server=http.createServer(async(req,res)=>{
    const approvals=await read('application-approvals.json',[]),notion=await read('notion-connection.json',{}),policy=await read('application-policy.json',{});
    const quality=await read('quality-packets.json',{packets:[],evidenceIssues:[]}),submissionMode=policy.submissionMode==='automatic'?'automatic':'manual';
    quality.packets=await Promise.all(quality.packets.map(p=>refreshPacket(home,p,{jobs,config,history,ledger:applicationLedger})));
-   return send(200,{jobs:jobs.map(({description,...j})=>({...j,track:roleTrack(j.title),fit:evaluate(j,config),previous:!!historyMatch(j,history)})).sort((a,b)=>b.fit.score-a.fit.score),qualityPackets:quality.packets.map(p=>({id:p.id,job:p.job,track:p.quality.track,ready:p.quality.ready,reasons:p.quality.reasons,missingRequirements:p.quality.missingRequirements,resume:p.quality.resume,proofCount:p.proofPoints.length,caseStudyCount:p.caseStudies.length})),evidenceIssues:quality.evidenceIssues||[],submissionMode,config,resume,career,authorizationMode:policy.authorizationMode||'per-posting-packet',boards:connections.boards||[],historyCount:history.length,busy:busy||worker.running,lastRun,worker:worker.status,workerConfig:await worker.config(),notion:{mode:notion.enabled?'direct integration':'saved snapshot',pageId:notion.pageId||null},applications:{packets:applicationPlan.packets.filter(p=>!applicationLedger.some(a=>a.packetDigest===p.digest)).map(p=>({id:p.id,company:p.job.company,title:p.job.title,url:p.job.url,salary:p.salary,resumeFilename:p.resumeFilename,fields:p.fields,answersPreview:p.answersPreview||[],expiresAt:p.expiresAt,approved:approvals.some(a=>a.approved&&a.packetDigest===p.digest&&Date.parse(a.expiresAt)>Date.now())})),held:applicationPlan.held,attempts:applicationLedger.map(a=>({id:a.id,company:a.company,title:a.title,status:a.status,reason:a.reason||'',createdAt:a.createdAt,canVerifyEmail:a.status==='submission_unknown'&&a.emailVerificationPending===true&&!!a.verificationCheckpoint&&!!worker.adapter?.preservedPage?.(a,{exact:true}),canResume:submissionMode==='automatic'&&a.status==='held'&&(policy.authorizationMode==='search-rules'&&policy.standingAuthorization?.enabled===true||applicationPlan.packets.some(p=>p.digest===a.packetDigest&&Date.parse(p.expiresAt)>Date.now()))}))},applicationStatus:submissionMode==='manual'?'Manual final submission. Mosaic prepares local evidence packets without filling, uploading or submitting. Existing receipts and explicitly authorized original-form verification remain available.':'Experimental automatic submission. Browser automation is detectable; current evidence, exact track PDF and authorization checks still apply. Only employer confirmation counts as submitted.'});
+   const lookup=createHistoryLookup(history);
+   const outcomes=summarizeOutcomes(applicationLedger,await read('application-outcomes.json',[]));
+   return send(200,{outcomes,discovery:await read('discovery-state.json',null),jobs:jobs.map(({description,...j})=>({...j,track:roleTrack(j.title),fit:evaluate(j,config),previous:!!lookup(j)})).sort((a,b)=>
+    Number(b.listingState!=='unlisted')-Number(a.listingState!=='unlisted') ||
+    Number(b.fit.disposition==='match')-Number(a.fit.disposition==='match') ||
+    b.fit.score-a.fit.score || Number(a.previous)-Number(b.previous) ||
+    String(b.firstSeen||'').localeCompare(String(a.firstSeen||''))),qualityPackets:quality.packets.map(p=>({id:p.id,job:p.job,track:p.quality.track,ready:p.quality.ready,reasons:p.quality.reasons,missingRequirements:p.quality.missingRequirements,resume:p.quality.resume,proofCount:p.proofPoints.length,caseStudyCount:p.caseStudies.length})),evidenceIssues:quality.evidenceIssues||[],submissionMode,config,resume,career,authorizationMode:policy.authorizationMode||'per-posting-packet',boards:connections.boards||[],historyCount:history.length,busy:busy||worker.running,lastRun,worker:worker.status,workerConfig:await worker.config(),notion:{mode:notion.enabled?'direct integration':'saved snapshot',pageId:notion.pageId||null},applications:{packets:applicationPlan.packets.filter(p=>!applicationLedger.some(a=>a.packetDigest===p.digest)).map(p=>({id:p.id,company:p.job.company,title:p.job.title,url:p.job.url,salary:p.salary,resumeFilename:p.resumeFilename,fields:p.fields,answersPreview:p.answersPreview||[],expiresAt:p.expiresAt,approved:approvals.some(a=>a.approved&&a.packetDigest===p.digest&&Date.parse(a.expiresAt)>Date.now())})),held:applicationPlan.held,attempts:applicationLedger.map(a=>({id:a.id,canRecordOutcome:!!confirmedReceipt(a),company:a.company,title:a.title,status:a.status,reason:a.reason||'',createdAt:a.createdAt,canVerifyEmail:a.status==='submission_unknown'&&a.emailVerificationPending===true&&!!a.verificationCheckpoint&&!!worker.adapter?.preservedPage?.(a,{exact:true}),canResume:submissionMode==='automatic'&&a.status==='held'&&(policy.authorizationMode==='search-rules'&&policy.standingAuthorization?.enabled===true||applicationPlan.packets.some(p=>p.digest===a.packetDigest&&Date.parse(p.expiresAt)>Date.now()))}))},applicationStatus:submissionMode==='manual'?'Manual final submission. Mosaic prepares local evidence packets without filling, uploading or submitting. Existing receipts and explicitly authorized original-form verification remain available.':'Experimental automatic submission. Browser automation is detectable; current evidence, exact track PDF and authorization checks still apply. Only employer confirmation counts as submitted.'});
   }
   if(req.method==='POST') {
    if(req.headers['x-rolemosaic-token']!==token||req.headers.origin!==`http://${req.headers.host}`)return send(403,{error:'Invalid local session'});
@@ -45,6 +52,10 @@ const server=http.createServer(async(req,res)=>{
    if(busy||worker.running)return send(409,{error:'Another operation is running'});
    busy=true;
    try {
+    if(req.url==='/api/record-outcome'){
+     const result=await recordOutcome(home,await body(req));
+     return send(200,{output:result.recorded?'Employer outcome recorded.':'This outcome is already recorded.'});
+    }
     if(req.url==='/api/prepare-packets'){const data=await body(req),r=await prepareQualityPackets({home,jobIds:data.jobIds,limit:data.limit||15});return send(200,{submissionMode:'manual',output:`Prepared ${r.packets.length} local evidence packets; nothing was sent to employers.`});}
     if(req.url==='/api/worker/start'){runWorker(worker.start());return send(202,{output:'Mosaic worker started using your configured application authorization mode.'});}
     if(req.url==='/api/worker/run'){const data=await body(req);if(data.jobIds&&(!Array.isArray(data.jobIds)||data.jobIds.length>30||data.jobIds.some(x=>typeof x!=='string')))return send(400,{error:'Invalid job selection'});worker.paused=false;runWorker(worker.cycle({jobIds:data.jobIds}));return send(202,{output:'Mosaic is searching and preparing applications in its own browser.'});}
@@ -67,7 +78,7 @@ const server=http.createServer(async(req,res)=>{
     if(req.url==='/api/status'){
      let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>10000)return send(413,{error:'Request too large'})}
      const body=JSON.parse(raw);if(!['new','saved','dismissed','applied','interview','rejected','offer'].includes(body.status))return send(400,{error:'Invalid status'});
-     const jobs=await read('jobs.json',[]),job=jobs.find(j=>j.id===body.id);if(!job)return send(404,{error:'Unknown job'});job.status=body.status;await write('jobs.json',jobs);return send(200,{ok:true});
+     return await worker.store.lock(async()=>{const jobs=await read('jobs.json',[]),job=jobs.find(j=>j.id===body.id);if(!job)return send(404,{error:'Unknown job'});job.status=body.status;await write('jobs.json',jobs);return send(200,{ok:true});});
     }
    }finally{busy=false;}
   }

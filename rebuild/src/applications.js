@@ -4,14 +4,16 @@ import { createHash, randomUUID } from 'node:crypto';
 import { evaluate, canonical, historyMatch, reapplicationHistory } from './core.js';
 import { optionForAnswer, sameAnswer } from './application-values.js';
 import {inspectQuality,qualityDigest,jobDigest} from './quality.js';
+import {mixedCompensation} from './sources.js';
 export { optionForAnswer, sameAnswer } from './application-values.js';
 
 export const digest = value => createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');
 export function submissionHold(policy,adapter){if(policy.submissionMode!=='automatic')return 'review_only';if(adapter?.transport==='playwright'&&policy.automationRiskAcknowledged!==true)return 'automation_risk_unacknowledged';return null;}
 async function qualityGate(store,ctx,job,packet,adapter){
+ const live=(await store.read('jobs.json',[])).find(j=>j.id===job.id);
+ if(job.listingState==='unlisted'||live?.listingState==='unlisted')return {ok:false,reasons:['Posting is no longer listed on the employer board']};
  if(ctx.policy.requireQualityReview===false&&adapter?.transport!=='playwright')return {ok:true};
  const {assessment}=await inspectQuality(store.root,job),qualitySha256=qualityDigest(assessment);
- const live=(await store.read('jobs.json',[])).find(j=>j.id===job.id);
  const reasons=[...assessment.reasons];if(assessment.resume.sha256!==ctx.resumeSha256)reasons.push('Active approved PDF does not match the reviewed résumé for this track');
  if(live&&jobDigest(live)!==jobDigest(job))reasons.push('Posting changed since packet preparation');
  if(packet&&packet.qualitySha256!==qualitySha256)reasons.push('Evidence, résumé or role review changed since preparation');
@@ -39,6 +41,7 @@ export function salaryForLocation(text,state) {
  const clean=String(text).replace(/\s+/g,' '),ranges=[];
  const pattern=/((?:(?:USA|US|United States)\s+)?(?:annual\s+)?base\s+(?:salary|pay|compensation)(?:\s+range)?[^$]{0,180})\$([\d,]+)\s*(?:-|–|—|to)\s*\$([\d,]+)(?=(.{0,55}))/gi;
  for(const m of clean.matchAll(pattern)){
+  if(mixedCompensation(m[1],m[4]))continue;
   const context=m[1]+' '+m[4];if(!/annual|per year|annually|yearly|full[- ]time position/i.test(context)||/CAD|AUD|hourly|monthly|per hour/i.test(context))continue;
   if(!/\bUS\b|USA|U\.S\.|USD|United States/i.test(context))continue;
   const region=m[1].match(/\(([^)]+)\)/)?.[1]||'';
@@ -55,10 +58,10 @@ export function salaryForLocation(text,state) {
  return ranges.length===1&&generic.length===1?generic[0]:null;
 }
 function inspectionSalary(inspection,state){
- const text=salaryForLocation(inspection.description,state);if(text)return text;
+ const text=salaryForLocation(inspection.description,state);if(text?.region)return text;
  const pay=inspection.compensation,e=inspection.publicEvidence;
- if(e&&samePosting(e.posting,inspection.job.url)&&/^https:\/\/(?:api\.ashbyhq\.com|boards-api\.greenhouse\.io)\//.test(e.sourceUrl||'')&&pay?.currency==='USD'&&pay.interval==='year'&&Number.isFinite(pay.min)&&Number.isFinite(pay.max)&&pay.max>=pay.min)return pay;
- return null;
+ if(e&&samePosting(e.posting,inspection.job.url)&&/^https:\/\/(?:api\.ashbyhq\.com|boards-api\.greenhouse\.io)\//.test(e.sourceUrl||'')&&pay?.currency==='USD'&&pay.interval==='year'&&Number.isFinite(pay.min)&&Number.isFinite(pay.max)&&pay.max>=pay.min)return pay.lowestTierMaximum!==undefined?pay:text||pay;
+ return text;
 }
 export function formDigest(form) {
  return digest({fields:form.fields.map(({label,type,required})=>({label,type,required})),resume:form.resume?.label,submit:form.submit?.label});
@@ -253,7 +256,7 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
    const scope={resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,searchSha256:ctx.searchSha256};
    if(!standingAuthorizationMatches(ctx.policy,scope,adapter))throw Error('Fresh held draft requires current native standing authorization');
    const restart=job&&await restartException(store,held.restartAuthorizationId,job,ctx,ledger,adapter,now(),held.id);
-   if(!job||held.restartAuthorizationId&&!restart||['applied','dismissed','rejected'].includes(job.status)||!restart&&duplicate(job,ctx.history,ledger.filter(a=>a.id!==held.id),ctx.reapplicationReviews))throw Error('Held draft is no longer eligible');
+   if(!job||job.listingState==='unlisted'||held.restartAuthorizationId&&!restart||['applied','dismissed','rejected'].includes(job.status)||!restart&&duplicate(job,ctx.history,ledger.filter(a=>a.id!==held.id),ctx.reapplicationReviews))throw Error('Held draft is no longer eligible');
    const inspection=await adapter.inspect(job),fresh=packetFromInspection(job,inspection,ctx,now());
    const freshQuality=await qualityGate(store,ctx,job,undefined,adapter);if(!freshQuality.ok)throw Error('Held draft needs evidence and track résumé review');if(freshQuality.qualitySha256){fresh.qualitySha256=freshQuality.qualitySha256;fresh.digest=digest(Object.fromEntries(Object.entries(fresh).filter(([k])=>k!=='digest')));}
    if(restart){fresh.restartAuthorizationId=restart.id;fresh.digest=digest(Object.fromEntries(Object.entries(fresh).filter(([k])=>k!=='digest')));}

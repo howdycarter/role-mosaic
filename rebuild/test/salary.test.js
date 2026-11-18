@@ -26,6 +26,22 @@ test('base salary evidence preserves range and refuses hourly, foreign and equit
  assert.equal(salaryFromText('Total compensation $200,000 - $250,000 annually'),null);
  assert.equal(salaryFromText('Base pay $200 - $250 per hour'),null);
 });
+test('variable pay never establishes base eligibility during discovery or live form inspection',async()=>{
+ const {salaryForLocation}=await import('../src/applications.js');
+ for(const text of ['US annual base salary plus commission for OTE of $210,000 - $240,000 USD','US annual base salary range: $210,000 - $240,000 USD (OTE)']){
+  assert.equal(salaryFromText(text),null);assert.equal(salaryForLocation(text,'TX'),null);
+ }
+ const clean='US annual base salary $210,000 - $240,000 USD plus discretionary bonus';
+ assert.equal(salaryFromText(clean).max,240000);assert.equal(salaryForLocation(clean,'TX').max,240000);
+});
+test('overlap needs an applicable tier when only the highest salary zone clears the floor',async()=>{
+ const {compensation}=await import('../src/core.js');
+ const tier=(title,minValue,maxValue)=>({title,components:[{minValue,maxValue,currencyCode:'USD',compensationType:'Salary',interval:'1 YEAR'}]});
+ const pay=ashbySalary({compensationTiers:[tier('Zone A',160000,180000),tier('Zone B',200000,260000)]});
+ assert.equal(pay.max,260000);assert.equal(pay.lowestTierMaximum,180000);
+ const fits=floor=>compensation({compensation:pay},{salaryRangeMode:'overlap',minAnnualBaseUsd:floor});
+ assert.equal(fits(190000).pass,false);assert.match(fits(190000).reason,/applicable tier/);assert.equal(fits(175000).pass,true);
+});
 
 test('GitLab annual pay requires its live employer policy and exact USD base-only structured band',async()=>{
  const job={url:'https://job-boards.greenhouse.io/gitlab/jobs/123'},data={id:123,title:'Director of Product',pay_input_ranges:[{title:'United States Salary Range',currency_type:'USD',min_cents:20320000,max_cents:34560000,blurb:'The base salary range does not include any bonuses, equity, or benefits.'}]};let policy=true;

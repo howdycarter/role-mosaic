@@ -23,12 +23,13 @@ test('saved packets become stale when source evidence changes and hide invalidat
 });
 test('ready packets are invalidated by review expiry, posting, salary rule, PDF or application-state changes',async()=>{
  const {prepareQualityPackets,refreshPacket}=await import('../src/packets.js'),{seedQuality}=await import('./helpers/quality-fixture.js'),{ApplicationStore}=await import('../src/applications.js');
- for(const mutation of ['expiry','posting','rules','pdf','attempt','tamper']){const home=await mkdtemp(path.join(os.tmpdir(),'mosaic-packet-drift-')),store=new ApplicationStore(home);try{
+ for(const mutation of ['expiry','posting','unlisted','rules','pdf','attempt','tamper']){const home=await mkdtemp(path.join(os.tmpdir(),'mosaic-packet-drift-')),store=new ApplicationStore(home);try{
  const job={id:'r',company:'Example',title:'Director Product',description:'Product delivery',location:'Remote US',url:'https://example.invalid/job',compensation:{min:210000,max:250000,currency:'USD',interval:'year'}};
  await store.write('jobs.json',[job]);await store.write('search.json',{titleLevels:['director'],titleFields:['product'],localCities:[],minAnnualBaseUsd:190000});await writeFile(path.join(home,'own.pdf'),'%PDF-1.4 synthetic');await seedQuality(home,job,path.join(home,'own.pdf'));
  const p=(await prepareQualityPackets({home,jobIds:['r']})).packets[0];assert.equal(p.quality.ready,true);assert.equal((await refreshPacket(home,p)).stale,false);
  if(mutation==='expiry'){const r=await store.read('quality-reviews.json');r.r.reviewedAt='2000-01-01T00:00:00Z';await store.write('quality-reviews.json',r);}
  if(mutation==='posting')await store.write('jobs.json',[{...job,description:'New mandatory requirements'}]);
+ if(mutation==='unlisted'){await store.write('jobs.json',[{...job,listingState:'unlisted'}]);assert.equal((await prepareQualityPackets({home})).packets.length,0);}
  if(mutation==='rules')await store.write('search.json',{titleLevels:['director'],titleFields:['product'],localCities:[],minAnnualBaseUsd:300000});
  if(mutation==='pdf')await writeFile(p.quality.resume.path,'%PDF-1.4 changed');
  if(mutation==='attempt')await store.write('application-ledger.json',[{jobId:'r',status:'submission_unknown'}]);

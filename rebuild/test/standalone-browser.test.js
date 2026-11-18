@@ -67,6 +67,26 @@ test('live hybrid location overrides a contradictory remote feed and visible req
  }finally{await browser.close();await rm(root,{recursive:true,force:true});}
 });
 
+test('the live inspection keeps a location constraint from either the API or the visible form',{skip:process.env.MOSAIC_BROWSER_TESTS!=='1'},async()=>{
+ const {chromium}=await import('playwright');
+ const root=await mkdtemp(path.join(os.tmpdir(),'mosaic-live-scope-'));
+ const browser=await chromium.launch({headless:true,channel:process.env.MOSAIC_TEST_CHANNEL||undefined,chromiumSandbox:true}),context=await browser.newContext();
+ try{
+  const cases=[
+   {id:'111',visible:'Remote US',api:'San Francisco, California',expected:'San Francisco, California'},
+   {id:'222',visible:'Remote US (California only)',api:'Remote, United States',expected:'Remote US (California only)'},
+   {id:'333',visible:'Remote US</p><p>'+'Company mission. '.repeat(115)+'</p><p>Candidates must reside in California.',api:'Remote, United States',expected:'Location restrictions require review'},
+  ];
+  for(const {id,visible,api,expected} of cases){
+   const url='https://job-boards.greenhouse.io/example/jobs/'+id;
+   await context.route(url,route=>route.fulfill({contentType:'text/html',body:'<h1>Director of Product</h1><p>'+visible+'</p>'}));
+   const adapter=new PlaywrightApplicationAdapter(context,{home:root,evidenceLoader:async()=>({title:'Director of Product',posting:url,location:api,sourceUrl:'https://boards-api.greenhouse.io/v1/boards/example/jobs/'+id})});
+   const inspection=await adapter.inspect({id,title:'Director of Product',url});
+   assert.equal(inspection.location,expected);
+  }
+ }finally{await browser.close();await rm(root,{recursive:true,force:true});}
+});
+
 test('anonymous Ashby location autocomplete inherits its required label and uses an observed selector',{skip:process.env.MOSAIC_BROWSER_TESTS!=='1'},async()=>{
  const {chromium}=await import('playwright');const root=await mkdtemp(path.join(os.tmpdir(),'mosaic-location-widget-'));const browser=await chromium.launch({headless:true,channel:process.env.MOSAIC_TEST_CHANNEL||undefined,chromiumSandbox:true}),context=await browser.newContext();
  try{

@@ -1,8 +1,8 @@
 import {open,unlink,mkdir} from 'node:fs/promises';
 import path from 'node:path';
 import {ApplicationStore,prepareApplications,runApplications,reconcileApplications,postingKey,authorizationMatches,standingAuthorizationMatches,supportedPosting,individualContributorReviewed,continueApplicationVerification} from './applications.js';
-import {evaluate,mergeJobs,historyMatch,reapplicationHistory} from './core.js';
-import {fetchBoard} from './sources.js';
+import {evaluate,historyMatch,reapplicationHistory} from './core.js';
+import {scanBoards} from './discovery.js';
 import {campaignProgress} from './campaign.js';
 import {prepareQualityPackets} from './packets.js';
 
@@ -26,18 +26,9 @@ export class MosaicWorker {
  async pause(){this.paused=true;clearInterval(this.timer);this.timer=null;await this.store.write('worker.json',{...await this.config(),enabled:false});this.status.pauseRequested=this.running;this.status.state=this.running?'pausing':'paused';await this.persist();return this.status;}
  async stop(){await this.pause();if(this.running)throw Error('Worker is finishing its current operation; browser preserved');if(this.adapter)await this.adapter.close();this.adapter=null;}
  async discover(){
-  const connections=await this.store.read('connections.json',{}),boards=connections.boards||[];
-  if(!boards.length)throw Error('No employer boards configured');
-  const successes=[],failures=[];
-  // Bounded concurrency; a failing source cannot erase saved jobs.
-  for(let offset=0;offset<boards.length;offset+=4){
-   if(this.paused)break;
-   const batch=boards.slice(offset,offset+4),results=await Promise.allSettled(batch.map(b=>fetchBoard(b,this.fetcher)));
-   results.forEach((r,i)=>r.status==='fulfilled'?successes.push(...r.value):failures.push({source:batch[i].type+'/'+batch[i].slug,reason:String(r.reason).slice(0,160)}));
-  }
-  if(!successes.length&&failures.length)throw Error('All employer sources failed; saved jobs preserved');
-  const jobs=mergeJobs(await this.store.read('jobs.json',[]),successes);await this.store.write('jobs.json',jobs);
-  this.status.discovery={at:new Date().toISOString(),boards:boards.length,fetched:successes.length,saved:jobs.length,failures};await this.persist();
+  this.status.discovery=await scanBoards({store:this.store,fetcher:this.fetcher,shouldStop:()=>this.paused});
+  await this.persist();
+  if(this.status.discovery.status==='failed')throw Error('All employer sources failed; saved jobs preserved');
  }
  async cycle({discover=true,prepare=true,submit=true,jobIds}={}){
   if(this.running)throw Error('Worker already running');
@@ -81,7 +72,7 @@ export class MosaicWorker {
     const reviews=await this.store.read('reapplication-reviews.json',[]);
     const candidates=jobs.filter(j=>{
      const blockingHistory=reapplicationHistory(j,history,reviews);
-     if(!supportedPosting(j.url))return false;
+     if(j.listingState==='unlisted'||!supportedPosting(j.url))return false;
      if(jobIds&&!jobIds.includes(j.id))return false;
      if(['applied','dismissed','rejected'].includes(j.status)||historyMatch(j,blockingHistory)||ledger.some(a=>a.jobId===j.id))return false;
      if(blockingHistory.some(r=>{try{return r.posting&&postingKey(r.posting)===postingKey(j.url)}catch{return false}}))return false;

@@ -5,6 +5,7 @@ import {CodexBrowserAdapter} from './browser-adapter.js';
 import {digest,postingKey,supportedPosting} from './applications.js';
 import {optionForAnswer,sameAnswer} from './application-values.js';
 import {livePostingEvidence} from './sources.js';
+import {nationwideUSRemote,qualifiedUSRemote,requiresLocalResidence} from './location.js';
 
 // A native transport: no Codex connection, browser extension, CDP attachment,
 // user-profile copying, stealth switches, remote debugging port or AI API.
@@ -60,10 +61,13 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
    const evidence=await this.evidenceLoader(job,undefined,{allowAnnualBaseAssumption:rules.allowAnnualBaseAssumption===true}),norm=s=>String(s).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
    if(evidence&&norm(evidence.title)===norm(job.title)&&evidence.posting===job.url){
     inspection.compensation=evidence.compensation;inspection.publicEvidence={posting:job.url,sourceUrl:evidence.sourceUrl,checkedAt:new Date().toISOString()};
-    if(evidence.location==='Remote, United States'&&!/Location Type\s*(?:Hybrid|On.?site)|\bexcept\b|\bexcluding\b|only (?:candidates|residents)|not eligible|must (?:reside|live|relocate)|\brequired.*(?:onsite|on-site|office)\b/i.test(applicationText+'\n'+overview))inspection.location=evidence.location;
+    if(evidence.location&&nationwideUSRemote(inspection.location)&&!nationwideUSRemote(evidence.location))inspection.location=evidence.location;
+    const listingText=applicationText+'\n'+overview,scoped=listingText.split(/\r?\n/).find(qualifiedUSRemote);
+    if(scoped)inspection.location=scoped;
+    else if(evidence.location==='Remote, United States'&&!/Location Type\s*(?:Hybrid|On.?site)|\bexcept\b|\bexcluding\b|only (?:candidates|residents)|not eligible|must (?:reside|live|relocate)|\brequired.*(?:onsite|on-site|office)\b/i.test(listingText))inspection.location=evidence.location;
    }
   }catch{/* Missing public evidence remains a hold, never a guessed salary. */}
-  if(/Location Type\s*(?:Hybrid|On.?site)/i.test(applicationText+'\n'+overview))inspection.location='Location restrictions require review';
+  if(requiresLocalResidence(overview)||/Location Type\s*(?:Hybrid|On.?site)/i.test(applicationText+'\n'+overview))inspection.location='Location restrictions require review';
   const groups=await tab.page.evaluate(()=>[...document.querySelectorAll('.ashby-application-form-field-entry[data-field-path]')].filter(e=>e.getClientRects().length).flatMap(e=>{
    const buttons=[...e.querySelectorAll('button[aria-pressed]')].filter(b=>b.getClientRects().length),label=e.querySelector('label');
    if(!label)return [];

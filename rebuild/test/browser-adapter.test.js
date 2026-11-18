@@ -13,6 +13,11 @@ test('explicit US remote policy is separated from hybrid office branding and res
  assert.equal(postingLocation(policy+'Minimum Qualifications:\n10+ years designing products.\nPreferred Qualifications:\nAI tooling.'),'Remote, United States');
  assert.notEqual(postingLocation(policy+'Minimum Qualifications:\nThis role must reside in California and work on-site.\nPreferred Qualifications:'),'Remote, United States');
  assert.equal(postingLocation('VP Product\nRemote - USA'),'Remote, United States');
+ assert.notEqual(postingLocation('VP Product\nRemote - USA (California only)'),'Remote, United States');
+ const intro='VP Product\nRemote - USA\nAbout the role\n'+'Company mission. '.repeat(115)+'\nMinimum Qualifications:\n';
+ assert.equal(postingLocation(intro+'Candidates must reside in California or New York.'),'Location restrictions require review');
+ assert.equal(postingLocation(intro+'Applicants must reside in the United States.'),'Remote, United States');
+ assert.equal(postingLocation(intro+'For other office roles, candidates must reside in California.'),'Remote, United States');
  assert.equal(postingLocation('VP Product\nRemote - US, excluding Texas'),'Location restrictions require review');
 });
 test('AX controls use exact observed ids and label fallback when the browser omits an id',()=>{

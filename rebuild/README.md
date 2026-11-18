@@ -157,3 +157,18 @@ If initialization refuses, choose a new workspace instead of deleting applicant 
 ## Standing authorization for the native worker
 
 Mosaic's experimental native worker can use standing authorization only after explicit automatic-mode selection and acknowledgement that browser automation is detectable. Manual mode remains the default, including for existing workspaces without a `submissionMode`. Exact evidence, track-PDF and requirement-review checks apply in addition to résumé/profile/search authorization, daily quota, budget and employer verification. Existing receipt reconciliation and specifically authorized original-form email verification remain available without restarting a submission. See [application quality](../docs/APPLICATION_QUALITY.md).
+## Measure employer responses
+
+Open **Application review → Record an employer response** in the local dashboard. Select the confirmed posting and enter the employer’s response date and a short source reference. A rejection after an interview preserves both events. Flag a recruiting conversation that began before submission so it stays outside the application conversion measure.
+
+The same workflow is available from the rebuild directory:
+
+```bash
+npm start -- record-outcome --attempt ATTEMPT_ID --stage screen-invite --date YYYY-MM-DD --reference MESSAGE_ID
+npm start -- outcomes
+npm start -- outcomes --resume-sha256 FULL_APPROVED_PDF_DIGEST
+```
+
+The report counts each confirmed posting once. It measures the share with a recorded screen invitation, interview invitation or offer in its first 30 UTC calendar days. A cohort enters the denominator after that window closes. Missing replies appear as unknown outcomes. A rate depends on how completely you recorded incoming responses. Submitted applications with insufficient receipt evidence and unresolved submissions are shown separately. The dashboard accepts local entries; recording a response sends nothing to an employer.
+
+Run `npm start -- shortlist --track fde --limit 10` after discovery to check employer postings for a single track. The command reads official postings, including Greenhouse's dedicated pay-transparency data. It skips prior applications and openings missing from a successful board scan. It reports pay evidence, titles that changed, and requirements that still need review. It does not open application forms.

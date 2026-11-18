@@ -1,5 +1,5 @@
 import {mkdir,readFile,writeFile,copyFile} from 'node:fs/promises';import path from 'node:path';
-import {ApplicationStore} from './applications.js';import {evaluate,historyMatch} from './core.js';
+import {ApplicationStore} from './applications.js';import {evaluate,historyMatch,createHistoryLookup} from './core.js';
 import {loadEvidence,roleTrack,selectTrackResume,assessQuality,qualityDigest,jobDigest,tracks} from './quality.js';
 import {boundedFile} from './career.js';
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -31,7 +31,8 @@ export async function prepareQualityPackets({home,jobIds,limit=15}){
  if(!Number.isInteger(limit)||limit<1||limit>30||jobIds&&(!Array.isArray(jobIds)||jobIds.length>30||jobIds.some(id=>typeof id!=='string')))throw Error('Choose at most 30 roles');
  const store=new ApplicationStore(home),[jobs,config,history,ledger,evidence,reviews]=await Promise.all([store.read('jobs.json',[]),store.read('search.json',{}),store.read('history.json',[]),store.read('application-ledger.json',[]),loadEvidence(home),store.read('quality-reviews.json',{})]);
  const resumes=new Map();for(const t of tracks)resumes.set(t,await selectTrackResume(home,t));
- const selected=jobs.filter(j=>(!jobIds||jobIds.includes(j.id))&&roleTrack(j.title)&&!['applied','dismissed','rejected'].includes(j.status)&&!historyMatch(j,history)&&!ledger.some(a=>a.jobId===j.id||a.url===j.url)).map(job=>{
+ const lookup=createHistoryLookup(history);
+ const selected=jobs.filter(j=>j.listingState!=='unlisted'&&(!jobIds||jobIds.includes(j.id))&&roleTrack(j.title)&&!['applied','dismissed','rejected'].includes(j.status)&&!lookup(j)&&!ledger.some(a=>a.jobId===j.id||a.url===j.url)).map(job=>{
   const fit=evaluate(job,config),quality=assessQuality(job,evidence,{resume:resumes.get(roleTrack(job.title)),review:reviews[job.id]});
   if(fit.reasons.length){quality.ready=false;quality.reasons.push(...fit.reasons);}
   return {job,fit,quality};

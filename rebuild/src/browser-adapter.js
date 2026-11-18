@@ -2,11 +2,15 @@ import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { digest, formDigest, postingKey } from './applications.js';
 import { optionForAnswer, sameAnswer } from './application-values.js';
+import { nationwideUSRemote, qualifiedUSRemote, requiresLocalResidence } from './location.js';
 
 export function postingLocation(text){
+ if(requiresLocalResidence(text))return 'Location restrictions require review';
  const header=String(text).slice(0,1500);
  if(/\bexcept\b|\bexcluding\b|only (?:candidates|residents)|not eligible|must (?:reside|live|relocate)/i.test(header))return 'Location restrictions require review';
- if(/\bremote\s*[-,–]?\s*(?:us(?:a)?|united states)\b/i.test(header))return 'Remote, United States';
+ const lines=header.split(/\r?\n/),scoped=lines.find(qualifiedUSRemote);
+ if(scoped)return scoped;
+ if(lines.some(nationwideUSRemote))return 'Remote, United States';
  // Some postings explicitly allow US remote work after a hybrid office header.
  // The exception must not contradict an actual minimum qualification.
  const qualifications=String(text).split(/Minimum Qualifications:/i)[1]?.split(/Preferred Qualifications:/i)[0];
