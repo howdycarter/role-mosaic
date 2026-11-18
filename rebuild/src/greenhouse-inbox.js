@@ -29,12 +29,21 @@ export function greenhousePosting(raw) {
   } catch { return null; }
 }
 
-function applicationPosting(raw) {
+export function applicationPosting(raw) {
   const posting = greenhousePosting(raw);
-  return posting && !posting.confirmation ? posting : null;
+  if (posting) return posting.confirmation ? null : posting;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:' || url.port || url.username || url.password) return null;
+    const route = /^\/([a-z0-9_-]+)\/([a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})(?:\/(apply|application))?\/?$/i.exec(url.pathname);
+    const suffix = {'jobs.ashbyhq.com':'application','jobs.lever.co':'apply'}[url.hostname];
+    if (!route || !suffix || route[3] && route[3] !== suffix) return null;
+    const board = url.hostname + '/' + route[1], id = route[2].toLowerCase();
+    return {board, id, key:board+'/'+id, url:url.origin+'/'+route[1]+'/'+id, postingOnly:true};
+  } catch { return null; }
 }
 
-function question(field, form) {
+function question(field, form, posting) {
   if (!field || !field.required || !supported.has(field.type)) return null;
   const label = normalize(field.label).replace(/\s*\*+$/, '').trim();
   const help = normalize(field.description || field.helpText || '');
@@ -51,7 +60,7 @@ function question(field, form) {
   let allowed = ['posting'];
   if (!help && portable.test(wording)) allowed = scopes;
   else if (!help && employerHistory.test(wording) && !/\b(?:and|or|this (?:role|position)|if so|if yes)\b/i.test(wording)) allowed = ['posting', 'employer'];
-  return { key, label, type: field.type, options, scopes: allowed, ...(help ? { help } : {}) };
+  return { key, label, type: field.type, options, scopes: posting.postingOnly ? ['posting'] : allowed, ...(help ? { help } : {}) };
 }
 
 function formStamp(job, form) {
@@ -139,7 +148,7 @@ export async function readGreenhouseAnswers(store) {
 export function greenhouseAnswerFor(state, { job, field, form, profileSha256 }) {
   const posting = applicationPosting(job?.url);
   if (!posting || !state?.grants?.length) return undefined;
-  const q = question(field, form);
+  const q = question(field, form, posting);
   if (!q) return undefined;
   return grantFor(state, { ...posting, profileSha256, stamp: formStamp(job, form) }, q)?.answer;
 }
@@ -149,7 +158,7 @@ export async function observeGreenhouseQuestions({ store, job, form, missing, pr
   if (!posting || !job.id || !Array.isArray(missing) || !['worker', 'manual'].includes(channel)) return;
   const labels = new Set(missing);
   const questions = (form?.fields || []).filter(field => labels.has(field.label))
-    .map(field => question(field, form)).filter(Boolean);
+    .map(field => question(field, form, posting)).filter(Boolean);
   // An unsupported control is never answered by inventing a value. It can
   // still independently hold a posting after the answerable items are saved.
   const observation = questions.length ? {
@@ -184,14 +193,14 @@ async function liveObservations(store, state, profileSha256) {
   for (const attempt of ledger) {
     if (attempt.status === 'preflight_hold') continue;
     startedIds.add(attempt.jobId);
-    const key = greenhousePosting(attempt.url)?.key;
+    const key = (applicationPosting(attempt.url) || greenhousePosting(attempt.url))?.key;
     if (key) startedKeys.add(key);
     else if (attempt.postingKey) legacyKeys.add(attempt.postingKey);
   }
   const knownJobs = jobs && new Map(jobs.map(job => [job.id, job]));
   return state.observations.filter(o => {
     if (o.profileSha256 !== profileSha256 || startedIds.has(o.jobId) || startedKeys.has(o.key) ||
-        legacyKeys.has('greenhouse:' + o.id)) return false;
+        legacyKeys.has(o.postingOnly ? new URL(o.url).hostname + ':' + o.id : 'greenhouse:' + o.id)) return false;
     if (!knownJobs) return true;
     const job = knownJobs.get(o.jobId);
     return job && applicationPosting(job.url)?.key === o.key && job.title === o.title &&
@@ -232,13 +241,17 @@ function summarize(state, observations) {
   return { items: [...groups.values()], waitingJobIds: [...waiting], readyJobIds: [...ready] };
 }
 
-export async function readGreenhouseInbox(store) {
+export async function readGreenhouseInbox(store, { includeObserved = false } = {}) {
   const state = await readGreenhouseAnswers(store);
   const profileSha256 = await activeProfileHash(store);
   const savedAnswers = state.grants.filter(g => g.profileSha256 === profileSha256).map(g => ({
     id: g.id, label: g.label, scope: g.scope, company: g.company, title: g.title, confirmedAt: g.confirmedAt,
   }));
-  return { ...summarize(state, await liveObservations(store, state, profileSha256)), savedAnswers };
+  const observations = await liveObservations(store, state, profileSha256);
+  const result = { ...summarize(state, observations), savedAnswers };
+  if (includeObserved) result.observed = new Map(observations.filter(o => o.channel === 'worker')
+    .map(o => [o.jobId, new Set(o.questions.map(q => q.label))]));
+  return result;
 }
 
 export async function greenhouseRetryJobs(store) {

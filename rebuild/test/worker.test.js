@@ -1,6 +1,6 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,rm} from 'node:fs/promises';import os from 'node:os';import path from 'node:path';
-import {ApplicationStore,digest,approvePackets} from '../src/applications.js';import {MosaicWorker} from '../src/worker.js';import {prepareQualityPackets} from '../src/packets.js';
+import {ApplicationStore,digest,approvePackets,configureStandingAuthorization} from '../src/applications.js';import {MosaicWorker} from '../src/worker.js';import {prepareQualityPackets} from '../src/packets.js';
 test('default manual preparation never launches a browser or creates application attempts',async()=>{
  const home=await mkdtemp(path.join(os.tmpdir(),'mosaic-manual-')),s=new ApplicationStore(home);let launches=0;
  try{await s.write('jobs.json',[]);const worker=new MosaicWorker({home,adapterFactory:async()=>{launches++;throw Error('No browser should launch')}});const result=await worker.cycle({discover:false});assert.equal(result.submissionMode,'manual');assert.equal(launches,0);assert.deepEqual(await s.read('application-ledger.json',[]),[]);assert.equal((await s.read('quality-packets.json')).submissionMode,'manual');}finally{await rm(home,{recursive:true,force:true})}
@@ -105,4 +105,70 @@ test('changing to automatic while a manual run scans cannot escalate that run',a
  scan.resolve();
  const status=await finishRun(worker);assert.equal(status.state,'error');assert.match(status.error,/mode changed/);assert.equal(launches,0);
  assert.deepEqual(await store.read('application-ledger.json',[]),[]);
+});
+
+test('automatic selection prioritizes the exact reviewed track and records IC blockers without reselecting aliases',async t=>{
+ const home=await mkdtemp(path.join(os.tmpdir(),'mosaic-worker-ranking-')),store=new ApplicationStore(home);
+ t.after(()=>rm(home,{recursive:true,force:true}));
+ const pdf=Buffer.from('%PDF-1.4 synthetic ranking fixture'),file=path.join(home,'approved.pdf');
+ await writeFile(file,pdf);
+ const profile={verified:true,facts:{fullName:'Test Person',email:'person@example.invalid'}};
+ const pay={min:210000,max:240000,currency:'USD',interval:'year'};
+ const make=(id,number,title)=>({id,title,company:'Fixture '+id,location:'Remote US',compensation:pay,
+  url:'https://job-boards.greenhouse.io/fixture/jobs/'+number,description:'Annual base salary $210,000–$240,000 USD per year.'});
+ const design=make('design',11,'Director of Design'),ic=make('ic',12,'Staff Forward Deployed Engineer');
+ const near=make('unknown-pay',21,ic.title),nearBelow=make('below-floor',22,ic.title);
+ near.compensation=null;nearBelow.compensation=null;
+ const ready=make('ready',13,'Director of Forward Deployed Engineering');
+ const interview=make('interview',14,ready.title),offer=make('offer',15,ready.title),unknown=make('unknown',16,ready.title);
+ const alias=job=>({...job,id:job.id+'-alias',url:job.url+'?ref=alias',status:'new'});
+ const ledger=[{id:'attempt-unknown',jobId:'older-import',url:unknown.url,status:'submission_unknown'}];
+ const historyJob=make('history',17,ready.title);
+ const jobs=[design,{...interview,status:'interview'},alias(interview),{...offer,status:'offer'},alias(offer),
+  alias(unknown),alias(historyJob),ic,alias(ic),near,nearBelow,ready];
+ const {seedQuality}=await import('./helpers/quality-fixture.js');
+ await seedQuality(home,ready,file);
+ // Only the variant in the registry is approved for this grant. The old default is intentionally unavailable.
+ await store.write('connections.json',{resume:'unavailable-legacy-product.pdf'});await store.write('application-profile.json',profile);
+ await store.write('worker.json',{enabled:false,maxInspections:1});await store.write('jobs.json',jobs);
+ await store.write('history.json',[{company:'Archived name',role:'Archived role',posting:historyJob.url}]);
+ await store.write('application-ledger.json',ledger);
+ await store.write('search.json',{titleLevels:['director'],titleFields:['design','engineering'],localCities:[],minAnnualBaseUsd:190000,
+  fdeTarget:{enabled:true,levels:['staff','director']}});
+ await store.write('application-policy.json',{enabled:true,submissionMode:'automatic',automationRiskAcknowledged:true,
+  requireQualityReview:true,requireICReview:true,applicationResumeTrack:'fde',maxPerDay:15,dailyBudgetUsd:1,
+  timezone:'America/Chicago',resumeApprovalPath:'resume-approval.json',verifiedProfileSha256:digest(profile)});
+ await configureStandingAuthorization({home,evidence:'Synthetic fixture authorization for the selected track.'});
+ const inspections=[],publicChecks=[];
+ const fetcher=async(url,options)=>{
+  assert.equal(options.method||'GET','GET');assert.equal(options.body,undefined);
+  const target=new URL(url);
+  assert.equal(target.origin,'https://boards-api.greenhouse.io');
+  const id=target.pathname.split('/').at(-1);
+  publicChecks.push(id);
+  return Response.json({id,title:near.title,location:{name:'Remote US'},content:id==='21'
+   ?'Annual base salary $210,000 - $240,000 USD per year.':'Annual base salary $80,000 - $104,000 USD per year.'});
+ };
+ const worker=new MosaicWorker({home,fetcher,adapterFactory:async()=>({transport:'playwright',recoverReceipt:async attempt=>({confirmed:false,posting:attempt.url}),inspect:async job=>{
+  inspections.push(job.id);return {titleVerified:true,description:job.description,location:job.location,salary:pay,
+   form:{fields:[],resume:{label:'Résumé'},submit:{label:'Submit'}}};}})});
+ await worker.cycle({discover:false,submit:false});
+ assert.deepEqual(inspections,['ready']);
+ await worker.cycle({discover:false,submit:false});
+ let plan=await store.read('application-plan.json');
+ const hold=plan.held.find(x=>x.id==='ic');
+ assert.ok(hold);assert.ok(hold.questions.includes('Individual-contributor specialization requires review'));
+ assert.ok(hold.questions.includes('Complete current role-requirement review needed'));
+ await worker.cycle({discover:false,submit:false});
+ plan=await store.read('application-plan.json');
+ assert.ok(plan.held.some(x=>x.id===near.id && x.questions.includes('Individual-contributor specialization requires review')));
+ assert.deepEqual(worker.status.publicPostingChecks,{checked:1,passed:1});
+ await worker.cycle({discover:false,submit:false});
+ assert.deepEqual(worker.status.publicPostingChecks,{checked:1,passed:0});
+ assert.deepEqual(publicChecks,['21','22']);
+ plan=await store.read('application-plan.json');
+ assert.ok(!plan.held.some(x=>[design.id,nearBelow.id].includes(x.id)));
+ assert.ok(!plan.held.some(x=>x.id.endsWith('-alias')));
+ assert.deepEqual(inspections,['ready']);
+ assert.deepEqual(await store.read('application-ledger.json'),ledger);
 });

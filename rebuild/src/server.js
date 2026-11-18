@@ -1,4 +1,6 @@
-import {answerGreenhouseQuestion,forgetGreenhouseAnswer,readGreenhouseInbox} from './greenhouse-inbox.js';
+import {answerGreenhouseQuestion,forgetGreenhouseAnswer} from './greenhouse-inbox.js';
+import {inboxRoleReview,saveInboxRoleReview} from './inbox-role-review.js';
+import {readDecisionInbox} from './decision-inbox.js';
 import {checkPacketQuestions,isHostedGreenhouseJob} from './manual-greenhouse-questions.js';
 import {confirmedReceipt,recordOutcome,summarizeOutcomes} from './outcomes.js';
 import http from 'node:http';
@@ -14,7 +16,12 @@ import {syncNotion} from './notion-sync.js';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import {prepareQualityPackets,refreshPacket,packetHtml} from './packets.js';
-import {roleTrack} from './quality.js';
+import {roleTrack,selectTrackResume,tracks} from './quality.js';
+function clickScope(policy) {
+ const grant=policy.standingAuthorization;
+ if(!policy.enabled || policy.submissionMode!=='automatic' || policy.authorizationMode!=='search-rules' || !grant?.enabled)return null;
+ return {track:policy.applicationResumeTrack||null,maxPerDay:policy.maxPerDay,dailyBudgetUsd:policy.dailyBudgetUsd,timezone:policy.timezone};
+}
 const token=randomBytes(32).toString('hex');
 let busy=false, lastRun=null;
 const worker=new MosaicWorker({home});
@@ -23,7 +30,7 @@ const runWorker=work=>{work.catch(()=>{});};
 // idle refresh. Mutating endpoints and worker authorization always read disk.
 let cachedInbox;
 async function inboxView() {
- const files=['greenhouse-inbox.json','application-profile.json','application-policy.json','jobs.json','application-ledger.json','history.json'];
+ const files=['greenhouse-inbox.json','application-profile.json','application-policy.json','jobs.json','application-ledger.json','history.json','application-plan.json','quality-packets.json','reapplication-reviews.json'];
  const versions=await Promise.all(files.map(async file=>{
   try{
    const info=await stat(path.join(home,file),{bigint:true});
@@ -31,7 +38,7 @@ async function inboxView() {
   }catch(error){if(error.code==='ENOENT')return '-';throw error;}
  }));
  const version=versions.join('|');
- if(cachedInbox?.version!==version)cachedInbox={version,promise:readGreenhouseInbox(worker.store)};
+ if(cachedInbox?.version!==version)cachedInbox={version,promise:readDecisionInbox(worker.store)};
  const snapshot=cachedInbox;
  try{return await snapshot.promise;}catch(error){if(cachedInbox===snapshot)cachedInbox=null;throw error;}
 }
@@ -41,28 +48,32 @@ function continueInbox(jobIds) {
   worker.persist().catch(() => {});
  });
 }
-async function body(req){let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>10000)throw Error('Request too large')}try{return JSON.parse(raw||'{}')}catch{throw Error('Malformed JSON request')}}
+async function body(req,limit=10000){let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>limit)throw Error('Request too large')}try{return JSON.parse(raw||'{}')}catch{throw Error('Malformed JSON request')}}
 const server=http.createServer(async(req,res)=>{
  const send=(status,data)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(data));};
  try {
   if(req.headers.host!==`127.0.0.1:${server.address().port}`) return send(403,{error:'Local access only'});
   if(req.method==='GET'&&req.url==='/'){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Security-Policy':"default-src 'self'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'"});res.end((await readFile(new URL('../web/index.html',import.meta.url),'utf8')).replace('__TOKEN__',token));return;}
-  if(req.method==='GET'&&req.url==='/inbox.js'){
-   const script=await readFile(new URL('../web/inbox.js',import.meta.url));
+  if(req.method==='GET'&&['/inbox.js','/inbox-reviews.js'].includes(req.url)){
+   const script=await readFile(new URL('../web'+req.url,import.meta.url));
    res.writeHead(200,{'Content-Type':'text/javascript; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});
    return res.end(script);
   }
   if(req.method==='GET'&&req.url==='/api/inbox')return send(200,await inboxView());
+  if(req.method==='GET'&&req.url.startsWith('/api/inbox/role-review?')){
+   try { return send(200,await inboxRoleReview(worker.store,new URL(req.url,'http://'+req.headers.host).searchParams.get('jobId'))); }
+   catch(error){return send(409,{error:error.message});}
+  }
   if(req.method==='GET'&&req.url.startsWith('/api/packet?')){const id=new URL(req.url,'http://'+req.headers.host).searchParams.get('id');if(!/^[a-f0-9]{64}$/.test(id||''))return send(400,{error:'Invalid packet identifier'});let html;try{html=packetHtml(await refreshPacket(home,JSON.parse(await readFile(path.join(home,'packets',id+'.json'),'utf8'))))}catch(e){if(e.code==='ENOENT')return send(404,{error:'Packet not found'});throw e}res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"});res.end(html);return;}
   if(req.method==='GET'&&req.url==='/api/worker/status'){
    const policy=await read('application-policy.json',{}), w=worker.status;
    const summary={state:w.state,stage:w.stage,startedAt:w.startedAt,lastRun:w.lastRun,error:w.error,
-    qualityPackets:w.qualityPackets,inboxChecks:w.inboxChecks,
+    qualityPackets:w.qualityPackets,inboxChecks:w.inboxChecks,publicPostingChecks:w.publicPostingChecks,
     boardProgress:w.stage==='discovery'?w.boardProgress:undefined};
    if(w.discovery)summary.discovery={startedAt:w.discovery.startedAt,succeeded:w.discovery.succeeded,boards:w.discovery.boards,added:w.discovery.added};
    if(w.plan)summary.plan={prepared:w.plan.prepared,heldCount:w.plan.held?.length||0};
    if(w.campaign)summary.campaign={complete:w.campaign.complete};
-   return send(200,{busy:busy||worker.running,submissionMode:policy.submissionMode==='automatic'?'automatic':'manual',worker:summary});
+   return send(200,{busy:busy||worker.running,submissionMode:policy.submissionMode==='automatic'?'automatic':'manual',worker:summary,clickScope:clickScope(policy)});
   }
   if(req.method==='GET'&&req.url==='/api/health') {
    try {
@@ -77,8 +88,9 @@ const server=http.createServer(async(req,res)=>{
    const quality=await read('quality-packets.json',{packets:[],evidenceIssues:[]}),submissionMode=policy.submissionMode==='automatic'?'automatic':'manual';
    quality.packets=await Promise.all(quality.packets.map(p=>refreshPacket(home,p,{jobs,config,history,ledger:applicationLedger})));
    const lookup=createHistoryLookup(history);
+   const approvedTracks=(await Promise.all(tracks.map(t=>selectTrackResume(home,t)))).filter(r=>r.status==='approved').map(({track,sha256,filename})=>({track,sha256,filename}));
    const outcomes=summarizeOutcomes(applicationLedger,await read('application-outcomes.json',[]));
-   return send(200,{outcomes,discovery:await read('discovery-state.json',null),jobs:jobs.map(({description,...j})=>({...j,track:roleTrack(j.title),fit:evaluate(j,config),previous:!!lookup(j)})).sort((a,b)=>
+   return send(200,{outcomes,approvedTracks,clickScope:clickScope(policy),discovery:await read('discovery-state.json',null),jobs:jobs.map(({description,...j})=>({...j,track:roleTrack(j.title),fit:evaluate(j,config),previous:!!lookup(j)})).sort((a,b)=>
     Number(b.listingState!=='unlisted')-Number(a.listingState!=='unlisted') ||
     Number(b.fit.disposition==='match')-Number(a.fit.disposition==='match') ||
     b.fit.score-a.fit.score || Number(a.previous)-Number(b.previous) ||
@@ -122,6 +134,21 @@ const server=http.createServer(async(req,res)=>{
    if(busy||worker.running)return send(409,{error:'Another operation is running'});
    busy=true;
    try {
+    if(req.url==='/api/automatic-submissions'){
+     const data=await body(req);
+     if(data.confirm!=='enable-under-my-search-rules'||data.acknowledgeAutomationRisk!==true)return send(400,{error:'Confirm automatic applications with the selected résumé and acknowledge detectable browser automation.'});
+     try{
+      if(worker.running)return send(409,{error:'Wait for the current run.'});
+      await worker.pause();
+      const evidence=data.authorizationEvidence??'Applicant enabled click-to-run automatic applications under the saved search rules and daily limits with the selected approved résumé.';
+      const result=await configureStandingAuthorization({home,evidence,activate:{track:data.track,resumeSha256:data.resumeSha256,acknowledgeAutomationRisk:true}});
+      return send(200,{...result,output:'Automatic submissions are ready. Click Run Mosaic to start.'});
+     }catch(error){return send(/changed|owns this workspace/.test(error.message)?409:400,{error:error.message});}
+    }
+    if(req.url==='/api/inbox/role-review'){
+     try { return send(200,await saveInboxRoleReview(worker.store,await body(req,100000))); }
+     catch(error){return send(409,{error:error.message});}
+    }
     if(req.url==='/api/record-outcome'){
      const result=await recordOutcome(home,await body(req));
      return send(200,{output:result.recorded?'Employer outcome recorded.':'This outcome is already recorded.'});

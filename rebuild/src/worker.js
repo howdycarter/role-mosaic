@@ -1,14 +1,95 @@
 import {open,unlink,mkdir} from 'node:fs/promises';
 import path from 'node:path';
-import {ApplicationStore,prepareApplications,runApplications,reconcileApplications,postingKey,authorizationMatches,standingAuthorizationMatches,supportedPosting,meetsContributorRule,continueApplicationVerification} from './applications.js';
-import {evaluate,historyMatch,reapplicationHistory} from './core.js';
+import {ApplicationStore,prepareApplications,runApplications,reconcileApplications,postingKey,samePosting,authorizationMatches,standingAuthorizationMatches,supportedPosting,meetsContributorRule,continueApplicationVerification} from './applications.js';
+import {canonical,createHistoryLookup,evaluate,historyMatch,reapplicationHistory} from './core.js';
+import {assessQuality,loadEvidence,roleTrack,selectTrackResume,tracks} from './quality.js';
 import {scanBoards} from './discovery.js';
+import {inspectShortlistPosting} from './shortlist.js';
 import {campaignProgress} from './campaign.js';
 import {readGreenhouseInbox} from './greenhouse-inbox.js';
 import {checkRunQuestions} from './manual-greenhouse-questions.js';
 import {prepareQualityPackets} from './packets.js';
 
 export const workerDefaults={enabled:false,intervalMinutes:30,maxInspections:15,headless:false,channel:'chrome',autoSubmitApproved:true};
+function keyFor(url) {
+ try { return postingKey(url); } catch { return null; }
+}
+
+// Rank before spending a browser inspection. The application engine rechecks every gate.
+async function rankApplicationJobs({store,jobs,search,history,ledger,pending,jobIds,ready,recheckIds,seen,policy,limit,fetcher,shouldStop}) {
+ const boundTrack=policy.applicationResumeTrack,grant=policy.standingAuthorization;
+ const [exceptions,reviews,evidence,resumes] = await Promise.all([
+  store.read('reapplication-reviews.json',[]),store.read('quality-reviews.json',{}),loadEvidence(store.root),
+  Promise.all((boundTrack?[boundTrack]:tracks).map(track=>selectTrackResume(store.root,track))),
+ ]);
+ let approvedHash;
+ if(boundTrack){
+  // Named-track grants pin the registered variant directly; the legacy default PDF can be unrelated.
+  approvedHash=policy.authorizationMode==='search-rules'
+   ? grant?.enabled && grant.resumeTrack===boundTrack && grant.resumeSha256 : resumes[0].sha256;
+ }else{
+  const approvalFile=path.relative(store.root,path.resolve(store.root,policy.resumeApprovalPath||'resume-approval.json'));
+  const approval=await store.read(approvalFile,{});
+  if(approval.approved)approvedHash=approval.sha256;
+ }
+ const exact = new Map(resumes.filter(resume=>resume.status==='approved' && resume.sha256===approvedHash).map(resume=>[resume.track,resume]));
+ if(boundTrack && !exact.size)throw Error('The selected résumé or standing authorization has changed. Review the exact track PDF before starting another run.');
+ const selectedIds = jobIds && new Set(jobIds), blockedIds = new Set(), blocked = new Set();
+ for(const packet of pending)blocked.add(keyFor(packet.job.url));
+ for(const a of ledger){
+  if(a.status==='preflight_hold')continue;
+  blockedIds.add(a.jobId);blocked.add(a.postingKey);blocked.add(keyFor(a.url));
+ }
+ for(const job of jobs)if(!['new','saved'].includes(job.status||'new'))blocked.add(keyFor(job.url));
+ const historyFor = createHistoryLookup(history);
+ const historicalPostings = new Set(history.flatMap(row=>[row.postingKey,keyFor(row.posting||row.url)]).filter(Boolean));
+ const reviewUrls = new Set(exceptions.map(r=>{try{return canonical(r.posting);}catch{return null;}}));
+ const now = new Date(), ranked = [];
+ for(const job of jobs){
+  if(job.listingState==='unlisted'||!supportedPosting(job.url)||selectedIds&&!selectedIds.has(job.id)||blockedIds.has(job.id))continue;
+  const track=roleTrack(job.title),key=postingKey(job.url);
+  if((boundTrack && track!==boundTrack)||blocked.has(key))continue;
+  if(historyFor(job)||historicalPostings.has(key)){
+   if(!reviewUrls.has(canonical(job.url)))continue;
+   const remaining=reapplicationHistory(job,history,exceptions);
+   if(historyMatch(job,remaining)||remaining.some(row=>row.postingKey===key||keyFor(row.posting||row.url)===key))continue;
+  }
+  const urgent=ready.has(job.id)||recheckIds.has(job.id);
+  const last=Math.max(Date.parse(seen[job.id])||0,Date.parse(seen[key])||0);
+  const ic=meetsContributorRule(job,policy,now),review=reviews[job.id];
+  const changed=Date.parse(review?.reviewedAt)>last || (ic && policy.individualContributorReviews?.some(r=>r.jobId===job.id && Date.parse(r.reviewedAt)>last));
+  if(!selectedIds && !urgent && !changed && now-last<86400000)continue;
+  const fit=evaluate(job,search);
+  if(fit.reasons.some(r=>!['Annual USD base compensation needs verification','Location needs review'].includes(r)))continue;
+  const match=fit.disposition==='match',resume=exact.get(track);
+  // An IC with missing specialization cannot proceed, but a matching posting must reach the review inbox.
+  if(!ic&&!match&&!boundTrack)continue;
+  const qualityReady=!!(resume && review && assessQuality(job,evidence,{resume,review,now}).ready);
+  ranked.push({job,key,urgent,ready:qualityReady&&ic,exact:!!resume,match,last,score:fit.score+(/\bremote\b/i.test(job.location)?5:0)});
+ }
+ ranked.sort((a,b)=>Number(b.urgent)-Number(a.urgent)||Number(b.ready)-Number(a.ready)||
+  Number(b.exact)-Number(a.exact)||Number(b.match)-Number(a.match)||a.last-b.last||b.score-a.score);
+ const candidates=[], researched=[];
+ for(const row of ranked){
+  if(shouldStop())break;
+  if(blocked.has(row.key))continue;
+  blocked.add(row.key);
+  if(boundTrack && !row.match){
+   // Public reads contain no applicant data. Rotate unresolved listings on subsequent runs.
+   if(researched.length>=limit)continue;
+   const {job}=row;
+   researched.push(job);
+   let live;
+   try{live=await inspectShortlistPosting(job,fetcher,search);}catch{continue;}
+   if(!live || !samePosting(live.posting,job.url) || String(live.title).trim().toLowerCase()!==job.title.trim().toLowerCase())continue;
+   if(evaluate({...job,location:live.location,compensation:live.compensation},search).disposition!=='match')continue;
+  }
+  candidates.push(row.job);
+  if(candidates.length===limit)break;
+ }
+ return {candidates,researched};
+}
+
 export class MosaicWorker {
  constructor({home,adapterFactory,fetcher=fetch}={}){
   this.home=home;this.store=new ApplicationStore(home);this.fetcher=fetcher;
@@ -163,29 +244,21 @@ export class MosaicWorker {
    if(prepare&&!this.paused){
     this.status.stage='preparing applications';await this.persist();
     const [jobs,search,history,seen]=await Promise.all([this.store.read('jobs.json',[]),this.store.read('search.json',{}),this.store.read('history.json',[]),this.store.read('worker-inspected.json',{})]);
-    const reviews=await this.store.read('reapplication-reviews.json',[]);
     const inbox=await readGreenhouseInbox(this.store);
-    const ready=new Set(inbox.readyJobIds);
-    const pendingKeys=new Set(pending.map(packet=>postingKey(packet.job.url)));
-    const candidates=jobs.filter(j=>{
-     const blockingHistory=reapplicationHistory(j,history,reviews);
-     if(j.listingState==='unlisted'||!supportedPosting(j.url))return false;
-     if(jobIds&&!jobIds.includes(j.id))return false;
-     if(pendingKeys.has(postingKey(j.url)))return false;
-     // An unanswered form can change at the employer. Let the normal inspection interval
-     // revisit it; a newly answered blocker bypasses the interval below.
-     if(['applied','dismissed','rejected'].includes(j.status)||historyMatch(j,blockingHistory)||ledger.some(a=>a.jobId===j.id))return false;
-     if(blockingHistory.some(r=>{try{return r.posting&&postingKey(r.posting)===postingKey(j.url)}catch{return false}}))return false;
-     if(!jobIds&&!ready.has(j.id)&&!recheckIds.has(j.id)&&seen[j.id]&&Date.now()-Date.parse(seen[j.id])<24*60*60000)return false;
-     const fit=evaluate({...j,compensation:j.compensation||{min:search.minAnnualBaseUsd,currency:'USD',interval:'year'}},search);
-     return meetsContributorRule(j,policy)&&!fit.reasons.some(r=>!['Annual USD base compensation needs verification','Location needs review'].includes(r));
-    }).sort((a,b)=>{
-     const rank=j=>evaluate({...j,compensation:j.compensation||{min:search.minAnnualBaseUsd,currency:'USD',interval:'year'}},search).score+(/\bremote\b/i.test(j.location)?5:0);
-     return Number(ready.has(b.id))-Number(ready.has(a.id)) || rank(b)-rank(a);
-    }).slice(0,config.maxInspections);
-    if(candidates.length){
+    const {candidates,researched}=await rankApplicationJobs({store:this.store,jobs,search,history,ledger,pending,jobIds,
+     ready:new Set(inbox.readyJobIds),recheckIds,seen,policy,limit:Math.min(config.maxInspections,policy.maxPerDay),
+     fetcher:this.fetcher,shouldStop:()=>this.paused});
+    const at=new Date().toISOString();
+    if(researched.length){
+     for(const job of researched){seen[job.id]=at;seen[postingKey(job.url)]=at;}
+     await this.store.write('worker-inspected.json',seen);
+     const selected=new Set(candidates.map(job=>job.id));
+     this.status.publicPostingChecks={checked:researched.length,passed:researched.filter(job=>selected.has(job.id)).length};
+    }
+    if(candidates.length && !this.paused){
      plan=await prepareApplications({home:this.home,adapter,jobIds:candidates.map(j=>j.id)});
-     for(const j of candidates)seen[j.id]=new Date().toISOString();await this.store.write('worker-inspected.json',seen);
+     for(const job of candidates){seen[job.id]=at;seen[postingKey(job.url)]=at;}
+     await this.store.write('worker-inspected.json',seen);
      const journal=await this.store.read('application-preflight-history.json',[]);journal.push({at:new Date().toISOString(),held:plan.held,prepared:plan.packets.map(p=>({id:p.id,company:p.job.company,title:p.job.title}))});await this.store.write('application-preflight-history.json',journal);
      if(submit&&config.autoSubmitApproved&&!this.paused){for(const packet of plan.packets){if(!await this.canContinue())break;if(standingAuthorizationMatches(await this.store.read('application-policy.json',{}),packet,adapter))await runApplications({home:this.home,adapter,packetIds:[packet.id],shouldContinue:()=>this.canContinue()});}}
     }

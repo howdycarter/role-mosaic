@@ -5,6 +5,7 @@
   const notice = byId('inboxNotice');
   const labels = { posting: 'Only this application', employer: 'Matching questions at this employer', future: 'Matching questions at any employer' };
   const cards = new Map();
+  const reviewCards = new Map();
   let generation = 0;
   let fetchVersion = 0;
   let lastPacket = null;
@@ -151,8 +152,21 @@
       if (old) old.node.replaceWith(node); else list.append(node);
       cards.set(item.id, { stamp, node });
     }
-    byId('inboxSummary').textContent = count === 0 ? 'No Greenhouse questions waiting for an answer.' :
-      count + (count === 1 ? ' question needs' : ' questions need') + ' your answer. Choose where Mosaic may use it.';
+    const reviews=inbox.reviews || [];
+    const currentReviews=new Set();
+    for (const row of reviews) {
+      const id=row.attemptId ? 'attempt:'+row.attemptId : 'job:'+row.jobId, stamp=JSON.stringify(row);
+      currentReviews.add(id);
+      const old=reviewCards.get(id);
+      if(old?.stamp===stamp || old?.node.querySelector('form'))continue;
+      const node=renderInboxReview(row,api,refresh);
+      if(old){node.open=old.node.open;old.node.replaceWith(node);}else byId('inboxReviews').append(node);
+      reviewCards.set(id,{node,stamp});
+    }
+    for(const [id,card] of reviewCards)if(!currentReviews.has(id)){card.node.remove();reviewCards.delete(id);}
+    byId('inboxSummary').textContent = count || reviews.length
+      ? count+(count===1?' question':' questions')+' to answer · '+reviews.length+(reviews.length===1?' application':' applications')+' to review.'
+      : 'Nothing needs your input right now.';
     renderSaved(inbox.savedAnswers);
   }
 

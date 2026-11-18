@@ -18,9 +18,15 @@ export async function initializeQuality(home){const store=new ApplicationStore(h
 export async function recordRoleReview({home,jobId,file,confirm,reviewer}){
  if(confirm!=='reviewed'||typeof reviewer!=='string'||!reviewer.trim()||!file)throw Error('Review every requirement and identify the actual reviewer');
  const store=new ApplicationStore(home),job=(await store.read('jobs.json',[])).find(j=>j.id===jobId);if(!job)throw Error('Unknown job');const data=JSON.parse(await boundedFile(file));
- if(!Array.isArray(data.requirements)||!data.requirements.length||data.requirements.some(r=>typeof r.text!=='string'||!r.text.trim()||!['supported','unknown','contradicted'].includes(r.status)||!Array.isArray(r.evidenceIds)||r.evidenceIds.some(id=>typeof id!=='string')))throw Error('List each requirement, status and evidence IDs; leave unsupported requirements unknown');
- const evidence=await loadEvidence(home),resume=await selectTrackResume(home,roleTrack(job.title)),review={jobDigest:jobDigest(job),evidenceDigest:evidence.digest,resumeSha256:resume.sha256||null,allMandatoryReviewed:true,reviewer:reviewer.trim(),reviewedAt:new Date().toISOString(),requirements:data.requirements};
+ const evidence=await loadEvidence(home),resume=await selectTrackResume(home,roleTrack(job.title));
+ const review=makeRoleReview(job,evidence,resume,reviewer,data.requirements);
  const reviews=await store.read('quality-reviews.json',{});reviews[job.id]=review;await store.write('quality-reviews.json',reviews);return assessQuality(job,evidence,{resume,review});
+}
+export function makeRoleReview(job,evidence,resume,reviewer,requirements){
+ if(typeof reviewer!=='string'||!reviewer.trim())throw Error('Identify the reviewer');
+ if(!Array.isArray(requirements)||!requirements.length||requirements.some(r=>typeof r.text!=='string'||!r.text.trim()||!['supported','unknown','contradicted'].includes(r.status)||!Array.isArray(r.evidenceIds)||r.evidenceIds.some(id=>typeof id!=='string')))throw Error('List each requirement, status and evidence IDs; leave unsupported requirements unknown');
+ return {jobDigest:jobDigest(job),evidenceDigest:evidence.digest,resumeSha256:resume.sha256||null,allMandatoryReviewed:true,
+  reviewer:reviewer.trim(),reviewedAt:new Date().toISOString(),requirements};
 }
 export function packetHtml(packet){
  const q=packet.quality,list=items=>items.map(s=>'<li>'+esc(s)+'</li>').join(''),links=packet.caseStudies.map(c=>'<li><a rel="noreferrer noopener" href="'+esc(c.url)+'">'+esc(c.title||c.id)+'</a></li>').join('');

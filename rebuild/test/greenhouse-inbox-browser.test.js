@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { ApplicationStore, configureStandingAuthorization, digest, postingKey } from '../src/applications.js';
+import { ApplicationStore, digest, postingKey } from '../src/applications.js';
 import { identity } from '../src/core.js';
 import { seedQuality } from './helpers/quality-fixture.js';
 import { postings, content, location, notice, priorEmployment } from './helpers/greenhouse-inbox-fixture.js';
@@ -54,7 +54,7 @@ async function seedWorkspace(home, store) {
   const boards = ['example-alpha','example-bravo'].map(slug=>({type:'greenhouse',slug,company:slug}));
   await store.write('connections.json',{resume,boards});
   await store.write('search.json',{titleLevels:['director'],titleFields:['product'],localCities:[],minAnnualBaseUsd:150000});
-  await store.write('application-policy.json',{enabled:true,submissionMode:'automatic',automationRiskAcknowledged:true,requireQualityReview:true,
+  await store.write('application-policy.json',{enabled:false,submissionMode:'manual',automationRiskAcknowledged:false,requireQualityReview:true,
     maxPerDay:15,dailyBudgetUsd:1,timezone:'UTC',resumeApprovalPath:'resume-approval.json',verifiedProfileSha256:digest(profile)});
   await store.write('worker.json',{enabled:false,headless:true,maxInspections:15,autoSubmitApproved:true});
   await store.write('history.json',[]);
@@ -63,7 +63,7 @@ async function seedWorkspace(home, store) {
   const uncertain=makeJob(postings.find(p=>p.id==='107'));
   await store.write('application-ledger.json',[{id:'original-uncertain',jobId:uncertain.id,company:uncertain.company,title:uncertain.title,
     url:uncertain.url,postingKey:postingKey(uncertain.url),status:'submission_unknown',createdAt:new Date().toISOString()}]);
-  await configureStandingAuthorization({home,evidence:'Fixture owner approved native submissions only for these synthetic forms'});
+  // Start with the same disabled legacy policy as a workspace moving from manual to automatic.
 }
 
 async function waitForIdle(base, store, expectedReceipts, previousStart) {
@@ -138,6 +138,21 @@ test('Greenhouse decisions continue the correct forms through Chrome, scope reus
     }
 
     await page.goto(server.base);
+    await page.getByText('Experimental automatic submission',{exact:true}).click();
+    await page.locator('#automaticTrack').selectOption('product');
+    await page.locator('#automationRisk').check();
+    const [activation]=await Promise.all([
+      page.waitForResponse(r=>r.url().endsWith('/api/automatic-submissions')),page.locator('#automaticEnable').click(),
+    ]);
+    assert.equal(activation.status(),200,await activation.text());
+    const armed=await store.read('application-policy.json');
+    assert.equal(armed.standingAuthorization.resumeTrack,'product');
+    assert.equal(armed.standingAuthorization.maxPerDay,15);
+    assert.equal((await store.read('application-ledger.json')).filter(a=>a.status==='submitted').length,0);
+    await assert.rejects(readFile(path.join(home,'fixture-events.jsonl')),{code:'ENOENT'});
+    assert.equal((await store.read('worker.json')).enabled,false);
+    await page.reload();
+    await page.getByText('Automatic applications',{exact:true}).waitFor();
     await runWave(1);
     assert.deepEqual((await submitted()).map(e=>e.id),['101']);
     assert.ok((await (await fetch(server.base+'/api/inbox')).json()).items.some(i=>i.label===notice&&i.postings.length===2));
@@ -160,7 +175,8 @@ test('Greenhouse decisions continue the correct forms through Chrome, scope reus
     const sent=await submitted();
     assert.deepEqual(sent.map(r=>r.id).sort(),['101','102','103','104','105','108']);
     assert.equal(sent.find(r=>r.id==='108').answer,'Two weeks');
-    assert.ok(sent.every(r=>r.name==='Example Applicant' && r.resume==='approved.pdf'));
+    const approvedTrack=(await store.read('resume-registry.json')).variants.product;
+    assert.ok(sent.every(r=>r.name==='Example Applicant' && r.resume===path.basename(approvedTrack.path)));
     assert.equal((await store.read('history.json')).length,6);
     const ledger=await store.read('application-ledger.json');
     assert.equal(ledger.filter(a=>a.status==='submitted'&&a.receipt?.confirmed).length,6);

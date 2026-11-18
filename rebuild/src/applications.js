@@ -3,9 +3,9 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { evaluate, canonical, historyMatch, reapplicationHistory } from './core.js';
 import { optionForAnswer, sameAnswer } from './application-values.js';
-import {inspectQuality,qualityDigest,jobDigest} from './quality.js';
+import {inspectQuality,qualityDigest,jobDigest,selectTrackResume,tracks} from './quality.js';
 import {mixedCompensation} from './sources.js';
-import {greenhousePosting, greenhouseAnswerFor, observeGreenhouseQuestions, readGreenhouseAnswers} from './greenhouse-inbox.js';
+import {greenhousePosting, applicationPosting, greenhouseAnswerFor, observeGreenhouseQuestions, readGreenhouseAnswers} from './greenhouse-inbox.js';
 export { optionForAnswer, sameAnswer } from './application-values.js';
 
 export const digest = value => createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');
@@ -17,6 +17,7 @@ async function qualityGate(store,ctx,job,packet,adapter){
  if(ctx.policy.requireQualityReview===false&&adapter?.transport!=='playwright')return {ok:true};
  const {assessment}=await inspectQuality(store.root,job),qualitySha256=qualityDigest(assessment);
  const reasons=[...assessment.reasons];if(assessment.resume.sha256!==ctx.resumeSha256)reasons.push('Active approved PDF does not match the reviewed résumé for this track');
+ if(ctx.policy.applicationResumeTrack && assessment.track!==ctx.policy.applicationResumeTrack)reasons.push('The standing authorization covers a different résumé track');
  if(live&&jobDigest(live)!==jobDigest(job))reasons.push('Posting changed since packet preparation');
  if(packet&&packet.qualitySha256!==qualitySha256)reasons.push('Evidence, résumé or role review changed since preparation');
  return {ok:assessment.ready&&reasons.length===0,reasons,qualitySha256};
@@ -158,14 +159,22 @@ export class ApplicationStore {
  async write(name,value){await mkdir(this.root,{recursive:true,mode:0o700});const dest=path.join(this.root,name),temp=dest+'.'+randomUUID()+'.tmp';await writeFile(temp,JSON.stringify(value,null,2)+'\n',{mode:0o600,flag:'wx'});await rename(temp,dest);}
  async lock(work){await mkdir(this.root,{recursive:true,mode:0o700});const file=path.join(this.root,'application-run.lock');let handle;try{handle=await open(file,'wx',0o600);}catch(e){if(e.code==='EEXIST')throw Error('Another application run owns this workspace; inspect its lock before recovery');throw e;}try{await handle.writeFile(JSON.stringify({createdAt:new Date().toISOString()}));await handle.close();return await work();}finally{await unlink(file);}}
 }
-async function prerequisites(store,now) {
- const [policy,search,connections,profile,history]=await Promise.all([store.read('application-policy.json',null),store.read('search.json',null),store.read('connections.json',null),store.read('application-profile.json',null),store.read('history.json',null)]);
+async function prerequisites(store,now,updatedPolicy) {
+ const [policy,search,connections,profile,history]=await Promise.all([updatedPolicy??store.read('application-policy.json',null),store.read('search.json',null),store.read('connections.json',null),store.read('application-profile.json',null),store.read('history.json',null)]);
  if(!policy?.enabled||policy.maxPerDay<1||policy.maxPerDay>15||!Number.isInteger(policy.maxPerDay)||!Number.isFinite(policy.dailyBudgetUsd)||policy.dailyBudgetUsd<0||typeof policy.timezone!=='string')throw Error('Enable application policy with 1–15 daily attempts and a nonnegative daily budget');
  dayAt(now,policy.timezone); // Validate timezone before any operation.
- if(!search||!connections?.resume||!profile?.verified||!Array.isArray(history))throw Error('Search, local history, verified application profile and approved PDF are required');
- const approval=JSON.parse(await readFile(path.resolve(store.root,policy.resumeApprovalPath),'utf8'));
- const resumePath=path.resolve(store.root,connections.resume),pdf=await readFile(resumePath),resumeSha256=digest(pdf);
- if(pdf.subarray(0,5).toString()!=='%PDF-'||approval.approved!==true||approval.sha256!==resumeSha256||path.resolve(store.root,approval.path)!==resumePath)throw Error('Resume approval must match the exact attached PDF bytes and path');
+ if(!search||!connections||!profile?.verified||!Array.isArray(history))throw Error('Search, local history, verified application profile and approved PDF are required');
+ let resumePath,resumeSha256;
+ if(policy.applicationResumeTrack){
+  const selected=await selectTrackResume(store.root,policy.applicationResumeTrack);
+  if(selected.status!=='approved')throw Error('The selected application track needs its exact approved PDF.');
+  resumePath=selected.path;resumeSha256=selected.sha256;
+ }else{
+  if(!connections.resume || !policy.resumeApprovalPath)throw Error('An approved application PDF is required');
+  const approval=JSON.parse(await readFile(path.resolve(store.root,policy.resumeApprovalPath),'utf8'));
+  resumePath=path.resolve(store.root,connections.resume);const pdf=await readFile(resumePath);resumeSha256=digest(pdf);
+  if(pdf.subarray(0,5).toString()!=='%PDF-'||approval.approved!==true||approval.sha256!==resumeSha256||path.resolve(store.root,approval.path)!==resumePath)throw Error('Resume approval must match the exact attached PDF bytes and path');
+ }
  const profileSha256=digest(profile),searchSha256=digest(search);
  if(profileSha256!==policy.verifiedProfileSha256)throw Error('Application profile changed since verification');
  if(!profile.facts?.email||!profile.facts?.fullName)throw Error('Verified name and application email are required');
@@ -199,7 +208,7 @@ export async function authorizeUnknownRestart({home,attemptId,evidence,confirm,n
  });
 }
 function historyUsed(history,day,timezone,attempts){
- const ids=new Set(attempts.map(a=>a.id));
+ const ids=new Set(attempts.map(a=>a.id).filter(Boolean));
  return history.filter(r=>{
   if(ids.has(r.receiptId)||!['applied','submitted','submitted_confirmed','confirmed_received','submission_unknown'].includes(String(r.status||r.outcome||'').toLowerCase()))return false;
   const date=r.submittedAt||r.appliedAt||r.date||r.at;if(!date)return false;
@@ -207,28 +216,68 @@ function historyUsed(history,day,timezone,attempts){
   const parsed=new Date(date);return Number.isFinite(parsed.getTime())&&dayAt(parsed,timezone)===day;
  }).length;
 }
+function quotaDay(attempt,timezone){
+ const finalAt=Date.parse(attempt.finalActionAt);
+ if(Number.isFinite(finalAt))return dayAt(new Date(finalAt),timezone);
+ // Original ledgers stored the local reservation day. Later receipt reconciliation
+ // can occur days after submission, so receipt and updatedAt are not fallback dates.
+ if(attempt.day)return attempt.day;
+ const createdAt=Date.parse(attempt.createdAt);
+ return Number.isFinite(createdAt)?dayAt(new Date(createdAt),timezone):null;
+}
+function dailyQuotaReached(policy,history,attempts,day,currentAttemptId){
+ const used=attempts.filter(attempt=>
+  (!currentAttemptId||attempt.id!==currentAttemptId) &&
+  (policy.authorizationMode!=='search-rules'||['submitted','submission_unknown'].includes(attempt.status)) &&
+  quotaDay(attempt,policy.timezone)===day
+ ).length;
+ return used+historyUsed(history,day,policy.timezone,attempts)>=policy.maxPerDay;
+}
 export function authorizationMatches(approval,packet,now) {
  return approval?.approved===true&&approval.packetDigest===packet.digest&&approval.resumeSha256===packet.resumeSha256&&approval.profileSha256===packet.profileSha256&&approval.searchSha256===packet.searchSha256&&Date.parse(approval.expiresAt)>now.getTime();
 }
 export function standingAuthorizationMatches(policy,packet,adapter){
  const grant=policy?.standingAuthorization;
- return adapter?.transport==='playwright'&&policy.authorizationMode==='search-rules'&&grant?.enabled===true&&grant.id&&grant.evidence&&grant.resumeSha256===packet.resumeSha256&&grant.profileSha256===packet.profileSha256&&grant.searchSha256===packet.searchSha256&&grant.maxPerDay===policy.maxPerDay&&grant.dailyBudgetUsd===policy.dailyBudgetUsd&&grant.timezone===policy.timezone;
+ return adapter?.transport==='playwright'&&policy.authorizationMode==='search-rules'&&grant?.enabled===true&&grant.id&&grant.evidence&&grant.resumeTrack===policy.applicationResumeTrack&&grant.resumeSha256===packet.resumeSha256&&grant.profileSha256===packet.profileSha256&&grant.searchSha256===packet.searchSha256&&grant.maxPerDay===policy.maxPerDay&&grant.dailyBudgetUsd===policy.dailyBudgetUsd&&grant.timezone===policy.timezone;
 }
 function applicationAuthorization(policy,packet,adapter,approvals,at){
  if(standingAuthorizationMatches(policy,packet,adapter))return {mode:'search-rules',grantId:policy.standingAuthorization.id,scopeDigest:digest(policy.standingAuthorization)};
  return approvals.some(a=>authorizationMatches(a,packet,at))?{mode:'per-posting-packet',packetDigest:packet.digest}:null;
 }
-export async function configureStandingAuthorization({home,evidence,enabled=true,now=()=>new Date()}){
- const store=new ApplicationStore(home),policy=await store.read('application-policy.json',{});
- if(!enabled){policy.authorizationMode='per-posting-packet';if(policy.standingAuthorization)policy.standingAuthorization.enabled=false;await store.write('application-policy.json',policy);return {enabled:false};}
- if(typeof evidence!=='string'||!evidence.trim())throw Error('Record the applicant\'s explicit authorization of automatic matching applications');
- const ctx=await prerequisites(store,now());
- const grant={id:randomUUID(),enabled:true,grantedAt:now().toISOString(),evidence:evidence.trim(),resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,searchSha256:ctx.searchSha256,maxPerDay:policy.maxPerDay,dailyBudgetUsd:policy.dailyBudgetUsd,timezone:policy.timezone};
- await store.write('application-policy.json',{...policy,authorizationMode:'search-rules',standingAuthorization:grant});return {enabled:true,grantId:grant.id};
+export async function configureStandingAuthorization({home,evidence,enabled=true,activate,now=()=>new Date()}){
+ const store=new ApplicationStore(home);
+ const save=async()=>{
+  let policy=await store.read('application-policy.json',{});
+  if(!enabled){
+   policy.authorizationMode='per-posting-packet';
+   if(policy.standingAuthorization)policy.standingAuthorization.enabled=false;
+   await store.write('application-policy.json',policy);
+   return {enabled:false};
+  }
+  if(typeof evidence!=='string'||!evidence.trim())throw Error("Record the applicant's explicit authorization of automatic matching applications");
+  if(activate){
+   if(activate.acknowledgeAutomationRisk!==true || !tracks.includes(activate.track) || !/^[a-f0-9]{64}$/.test(activate.resumeSha256)){
+    throw Error('Acknowledge detectable browser automation and select the exact approved track PDF.');
+   }
+   policy={...policy,enabled:true,submissionMode:'automatic',requireQualityReview:true,automationRiskAcknowledged:true,
+    automationRiskAcknowledgedAt:now().toISOString(),applicationResumeTrack:activate.track};
+  }
+  const ctx=await prerequisites(store,now(),policy);
+  if(activate && ctx.resumeSha256!==activate.resumeSha256)throw Error('The selected approved PDF has changed. Refresh the dashboard.');
+  const grant={id:randomUUID(),enabled:true,grantedAt:now().toISOString(),evidence:evidence.trim(),
+   resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,searchSha256:ctx.searchSha256,
+   maxPerDay:policy.maxPerDay,dailyBudgetUsd:policy.dailyBudgetUsd,timezone:policy.timezone};
+  if(policy.applicationResumeTrack)grant.resumeTrack=policy.applicationResumeTrack;
+  await store.write('application-policy.json',{...policy,authorizationMode:'search-rules',standingAuthorization:grant});
+  return {enabled:true,grantId:grant.id};
+ };
+ // Explicit activation validates the selected PDF and all facts before publishing one policy.
+ // Revocation remains immediate, including during a guarded submission.
+ return activate ? store.lock(save) : save();
 }
 async function applicationFillPlan(store, job, form, ctx, adapter) {
  const scope = {postingKey:postingKey(job.url),company:job.company};
- if(adapter.transport==='playwright' && greenhousePosting(job.url)){
+ if(adapter.transport==='playwright' && applicationPosting(job.url)){
   const state=await readGreenhouseAnswers(store);
   scope.inboxAnswer=field=>greenhouseAnswerFor(state,{job,field,form,profileSha256:ctx.profileSha256});
  }
@@ -254,10 +303,15 @@ export async function prepareApplications({home,adapter,limit=15,jobIds,restartA
   const restart=await restartException(store,restartAuthorizationId,job,ctx,attempts,adapter,now());
   if(restartAuthorizationId&&!restart)continue;
   if(!supportedPosting(job.url)||!restart&&duplicate(job,ctx.history,attempts,ctx.reapplicationReviews)||['applied','dismissed','rejected'].includes(job.status))continue;
-  const quality=await qualityGate(store,ctx,job,undefined,adapter);if(!quality.ok){clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,reason:'Application quality review required',questions:quality.reasons});continue;}
+  const contributorReviewed=meetsContributorRule(job,ctx.policy,now());
+  const quality=await qualityGate(store,ctx,job,undefined,adapter);
+  if(!quality.ok){
+   const questions=contributorReviewed?quality.reasons:[...quality.reasons,'Individual-contributor specialization requires review'];
+   clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,reason:'Application quality review required',questions});continue;
+  }
   const preliminary=evaluate({...job,compensation:job.compensation||{min:ctx.search.minAnnualBaseUsd,currency:'USD',interval:'year'}},ctx.search);
   if(preliminary.reasons.some(r=>!['Annual USD base compensation needs verification','Location needs review'].includes(r)))continue;
-  if(!meetsContributorRule(job,ctx.policy,now())){clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,reason:'Individual-contributor specialization requires review'});continue;}
+  if(!contributorReviewed){clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,reason:'Individual-contributor specialization requires review'});continue;}
   let inspection;try{inspection=await adapter.inspect(job);}catch{held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Posting or form could not be inspected'});continue;}
   if(!inspection.titleVerified||inspection.closed||inspection.login){clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Closed, sign-in required, or title mismatch'});continue;}
   const pay=inspectionSalary(inspection,ctx.profile.facts.stateCode);
@@ -329,9 +383,8 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
    const restart=await restartException(store,packet.restartAuthorizationId,packet.job,ctx,attempts,adapter,at,resumed?.id);
    if(packet.restartAuthorizationId&&!restart){results.push({jobId:packet.job.id,status:'restart_authorization_held'});continue;}
    if(!restart&&duplicate(packet.job,ctx.history,attempts.filter(a=>a.id!==resumed?.id),ctx.reapplicationReviews)){results.push({jobId:packet.job.id,status:'duplicate_held'});continue;}
-   const day=dayAt(at,ctx.policy.timezone),today=attempts.filter(a=>a.day===day),imported=historyUsed(ctx.history,day,ctx.policy.timezone,attempts);
-   const quota=ctx.policy.authorizationMode==='search-rules'?today.filter(a=>['submitted','submission_unknown'].includes(a.status)).length:today.length-(resumed?.day===day?1:0);
-   if(quota+imported>=ctx.policy.maxPerDay){results.push({status:'daily_limit'});break;}
+   const day=dayAt(at,ctx.policy.timezone),today=attempts.filter(a=>(a.costDay||a.day)===day);
+   if(dailyQuotaReached(ctx.policy,ctx.history,attempts,day,resumed?.id)){results.push({status:'daily_limit'});break;}
    const cost=adapter.estimatedCostUsd;
    if(!Number.isFinite(cost)||cost<0||today.reduce((n,a)=>n+(a.reservedCostUsd||0),0)+cost>ctx.policy.dailyBudgetUsd){results.push({status:'budget_limit'});break;}
    const authorization=applicationAuthorization(ctx.policy,packet,adapter,approvals,at);
@@ -349,6 +402,7 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
    if(!inspection.titleVerified||inspection.closed||inspection.login||fit.disposition!=='match'||authorization.mode!=='search-rules'&&formDigest(inspection.form)!==packet.formDigest||actions.inboxAnswerSha256!==packet.inboxAnswerSha256||actions.missing.length){results.push({jobId:packet.job.id,status:'posting_or_form_changed'});continue;}
    const attempt=resumed||{id:randomUUID(),jobId:packet.job.id,company:packet.job.company,title:packet.job.title,url:packet.job.url,tabId:packet.tabId,postingKey:key,day,status:'preparing',createdAt:at.toISOString(),reservedCostUsd:cost,resumeSha256:ctx.resumeSha256,profileSha256:ctx.profileSha256,packetDigest:packet.digest};attempt.authorization=authorization;
    if(restart){attempt.restartsAttemptId=restart.attemptId;attempt.restartAuthorizationId=restart.id;}
+   attempt.costDay??=attempt.day||day;
    if(resumed){attempt.status='preparing';attempt.reason=null;attempt.day=day;}else attempts.push(attempt);const save=async()=>{attempt.updatedAt=now().toISOString();await store.write('application-ledger.json',attempts);};await save();
    if(restart){const grants=await store.read('application-restart-authorizations.json',[]),g=grants.find(g=>g.id===restart.id);g.usedByAttemptId=attempt.id;g.usedAt=now().toISOString();await store.write('application-restart-authorizations.json',grants);}
    try{
@@ -380,7 +434,20 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
         finalPlan.missing.length || finalPlan.inboxAnswerSha256!==packet.inboxAnswerSha256)throw Error('Inbox answers or employer form changed before submission');
     }
     attempt.verificationCheckpoint=await adapter.captureVerificationCheckpoint?.(activeInspection);
-    attempt.status='submission_unknown';await save(); // Durable BEFORE the only final click.
+    // The application lock serializes other submissions. A slow form or resumed
+    // tab can cross local midnight after the initial quota check.
+    const finalHistory=await store.read('history.json',[]);
+    do{
+     const activation=now(),finalDay=dayAt(activation,current.policy.timezone);
+     if(dailyQuotaReached(current.policy,finalHistory,currentAttempts,finalDay,attempt.id)){
+      attempt.status='held';attempt.reason='Daily submission limit reached before final submission';
+      delete attempt.finalActionAt;
+      await save();break;
+     }
+     attempt.finalActionAt=activation.toISOString();attempt.day=finalDay;
+     attempt.status='submission_unknown';await save(); // Durable before dispatch.
+    }while(dayAt(now(),current.policy.timezone)!==attempt.day);
+    if(attempt.status==='held'){results.push({...attempt});break;}
     await adapter.submit(activeInspection);
     const receipt=await adapter.confirm(activeInspection);
     if(receipt?.emailVerificationPending)attempt.emailVerificationPending=true;

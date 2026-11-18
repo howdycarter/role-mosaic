@@ -29,6 +29,23 @@ test('local app serves state and refuses unauthorized writes',async()=>{
   assert.equal((await fetch(url+'/api/record-outcome',{method:'POST',body:JSON.stringify(outcome)})).status,403);
   assert.equal((await fetch(url+'/api/record-outcome',{method:'POST',headers,body:JSON.stringify(outcome)})).status,200);
   const updated=await(await fetch(url+'/api/state')).json();assert.equal(updated.outcomes.first30Days.advanced,1);assert.equal(updated.applications.attempts[0].canRecordOutcome,true);
+  const {digest}=await import('../src/applications.js');
+  const profile={verified:true,facts:{fullName:'Example Person',email:'example@example.invalid'}};
+  const settings={enabled:false,submissionMode:'manual',verifiedProfileSha256:digest(profile),maxPerDay:15,dailyBudgetUsd:1,timezone:'America/Chicago'};
+  await store.write('application-profile.json',profile);
+  await store.write('application-policy.json',settings);
+  await store.write('connections.json',{boards:[]});await store.write('history.json',[]);
+  const approved=(await store.read('resume-registry.json')).variants.product;
+  const enable=data=>fetch(url+'/api/automatic-submissions',{method:'POST',headers,body:JSON.stringify({
+   confirm:'enable-under-my-search-rules',acknowledgeAutomationRisk:true,track:'product',resumeSha256:approved.sha256,...data
+  })});
+  assert.equal((await enable({acknowledgeAutomationRisk:false})).status,400);
+  assert.equal((await enable({resumeSha256:'a'.repeat(64)})).status,409);
+  assert.deepEqual(await store.read('application-policy.json'),settings);
+  assert.equal((await enable({})).status,200);
+  assert.deepEqual((await(await fetch(url+'/api/worker/status')).json()).clickScope,{track:'product',maxPerDay:15,dailyBudgetUsd:1,timezone:'America/Chicago'});
+  assert.equal((await store.read('worker.json')).enabled,false);
+  assert.equal((await store.read('application-ledger.json')).length,1);
   const page=await fetch(url);assert.ok((await page.text()).includes('Career history'));
   assert.equal((await fetch(url+'/api/status',{method:'POST',body:'{}'})).status,403);
   await writeFile(path.join(dir,'application-ledger.json'),'invalid private record');const failed=await fetch(url+'/api/health');assert.equal(failed.status,503);assert.deepEqual(await failed.json(),{status:'error',recordsValid:false});
