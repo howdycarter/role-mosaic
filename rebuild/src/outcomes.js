@@ -36,12 +36,14 @@ export function confirmedReceipt(attempt) {
 
 export function summarizeOutcomes(ledger, events, { now = new Date(), resumeSha256 } = {}) {
   const postings = new Map();
+  const confirmedAttempts = new Map();
   const uncertain = new Set();
   let unverifiedSubmitted = 0;
   for (const attempt of ledger) {
     if (resumeSha256 && attempt.resumeSha256 !== resumeSha256) continue;
     const receipt = confirmedReceipt(attempt);
     if (receipt && receipt.time <= now.getTime()) {
+      confirmedAttempts.set(attempt.id, receipt.key);
       const previous = postings.get(receipt.key);
       if (!previous || receipt.time < previous.time) postings.set(receipt.key, receipt);
     } else if (attempt.status === 'submitted') {
@@ -52,7 +54,8 @@ export function summarizeOutcomes(ledger, events, { now = new Date(), resumeSha2
   }
   const byPosting = new Map();
   for (const event of events) {
-    if (!postings.has(event.postingKey) || !stages.includes(event.stage) || event.date > utcDay(now)) continue;
+    if (confirmedAttempts.get(event.attemptId) !== event.postingKey || !postings.has(event.postingKey) ||
+        !stages.includes(event.stage) || event.date > utcDay(now)) continue;
     if (!byPosting.has(event.postingKey)) byPosting.set(event.postingKey, []);
     byPosting.get(event.postingKey).push(event);
   }

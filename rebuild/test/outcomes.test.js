@@ -79,3 +79,12 @@ test('receipt reporting recognizes both official Greenhouse hosts for the identi
     assert.equal(confirmedReceipt({ ...original, url: bad }), null);
   }
 });
+
+test('outcome evidence stays attached to the résumé actually used on its confirmed attempt', () => {
+  const a = { ...attempt(7), id: 'first', resumeSha256: 'A' };
+  const b = { ...attempt(7), id: 'second', resumeSha256: 'B' };
+  const events = [{ attemptId: 'second', postingKey: confirmedReceipt(b).key, date: '2026-03-16', stage: 'screen-invite' }];
+  assert.equal(summarizeOutcomes([a,b], events, { now, resumeSha256: 'A' }).first30Days.advanced, 0);
+  assert.equal(summarizeOutcomes([a,b], events, { now, resumeSha256: 'B' }).first30Days.advanced, 1);
+  assert.equal(summarizeOutcomes([a,b], events, { now }).confirmed, 1);
+});
