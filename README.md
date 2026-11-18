@@ -6,7 +6,7 @@ A local-first job-search workspace. Bring your own résumé, career history, sea
 
 After discovery, use the [employer shortlist and outcome report](rebuild/README.md#measure-employer-responses) to verify compensation for one track and track interview invitations against confirmed applications. A [daily macOS discovery schedule](docs/STANDALONE.md) can refresh the boards independently of the application worker.
 
-**Greenhouse decisions.** Open **Needs your input** on the local dashboard to answer a missing preflight question and choose where Mosaic may reuse it. The worker continues independently under the workspace’s existing permissions. [Using the inbox](rebuild/README.md#greenhouse-inbox)
+Click **Run Mosaic** above **Needs your input** to scan your boards once using your saved search rules. In manual mode, Mosaic prepares local evidence packets and collects published Greenhouse questions for matching roles. Answer in the inbox and choose where Mosaic may reuse each answer. [Using the inbox](rebuild/README.md#greenhouse-inbox)
 
 ## Quick start for a new applicant
 
@@ -32,11 +32,10 @@ Import your own Markdown/text, Notion export, positions CSV, structured JSON or 
 Edit `private/search.json` with your own title levels, disciplines, locations, exclusions, and annual base salary floor. The default floor is unset and must be chosen before a listing can pass the matching checks. Edit `private/connections.json` to choose public employer boards, then run:
 
 ```bash
-npm start -- discover
 npm run app
 ```
 
-Open http://127.0.0.1:4317. The core supports Greenhouse, Lever, and Ashby boards. Location screening currently supports US remote work and configured local cities; other markets need additional implementation. Salary extraction and imported history are conservative heuristics, not a professional-fit assessment or live applicant-tracking integration. Inspect the employer posting before acting.
+Open http://127.0.0.1:4317 and click **Run Mosaic**. The core supports Greenhouse, Lever, and Ashby boards. Location screening currently supports US remote work and configured local cities; other markets need additional implementation. Salary extraction and imported history are conservative heuristics, not a professional-fit assessment or live applicant-tracking integration. Inspect the employer posting before acting.
 
 To connect Notion independently, open **Career history → Connect Notion directly to Mosaic** and provide your page ID and a read-access integration token. The token stays in your private local workspace; source updates never approve résumé changes or application answers. Export/snapshot import remains available without a token. See the [setup guide](rebuild/README.md).
 

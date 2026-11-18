@@ -8,12 +8,13 @@ const boardKey = board => board.type + '/' + board.slug;
 
 // The calendar entry point only reads public job boards. No application worker,
 // Notion refresh, browser, résumé or applicant profile is needed for this scan.
-export async function scanBoards({ store, fetcher = fetch, shouldStop = () => false, now = () => new Date() }) {
+export async function scanBoards({ store, fetcher = fetch, shouldStop = () => false, onProgress, now = () => new Date() }) {
   const { boards } = await store.read('connections.json', {});
   if (!Array.isArray(boards) || !boards.length) throw Error('Configure at least one employer board.');
   const unique = [...new Map(boards.map(board => [boardKey(board), board])).values()];
   const startedAt = now().toISOString();
   const reports = [], listings = [], successful = new Set();
+  onProgress?.({ completed: 0, total: unique.length });
 
   for (let offset = 0; offset < unique.length && !shouldStop(); offset += 4) {
     const batch = unique.slice(offset, offset + 4);
@@ -28,6 +29,7 @@ export async function scanBoards({ store, fetcher = fetch, shouldStop = () => fa
       listings.push(...result.value);
       reports.push({ source, status: 'ok', fetched: result.value.length });
     }
+    onProgress?.({ completed: reports.length, total: unique.length });
   }
   const failures = reports.filter(report => report.status === 'failed');
   const status = reports.length < unique.length ? 'paused' : !successful.size ? 'failed' : failures.length ? 'partial' : 'ok';

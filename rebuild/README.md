@@ -110,11 +110,10 @@ Follow [evidence-led preparation](../docs/APPLICATION_QUALITY.md). Register prod
 ## 4. Discover and use the dashboard
 
 ```bash
-npm start -- discover
 npm run app
 ```
 
-Open **http://127.0.0.1:4317**. Search listings, choose a career track, review salary/location concerns, inspect imported career sources or a Notion snapshot, and update tracking states. Discovery reads the configured public employer APIs; applicant documents stay local. Failed sources are reported. If every source fails, saved jobs stay unchanged. Jobs may close after collection.
+Open **http://127.0.0.1:4317** and click **Run Mosaic** for one pass using the workspace’s current settings. Follow its progress in **Needs your input**. Search listings, choose a career track, review salary/location concerns, inspect imported career sources or a Notion snapshot, and update tracking states. Discovery reads the configured public employer APIs; applicant documents stay local. Failed sources are reported. If every source fails, saved jobs stay unchanged. Jobs may close after collection.
 
 Additional commands:
 
@@ -183,7 +182,7 @@ Open the local dashboard and look for **Needs your input**. When Mosaic inspects
 
 Use **Saved Greenhouse answers → Forget answer** to stop future reuse. Answers stay in the private workspace. The normal receipt, budget, eligibility, résumé and authorization checks apply to each posting.
 
-**Manual preparation.** Choose **Check public Greenhouse questions** on a current evidence packet. Mosaic reads the employer’s published required custom questions over a public GET. Answer in the inbox and use the saved answers shown in the packet’s question summary when completing the employer form yourself. Checking a packet requires a verified local application profile. The [Greenhouse Job Board API](https://docs.greenhouse.io/job-board.html) can expose a different subset of questions from the live form.
+**Manual preparation.** **Run Mosaic** collects published questions for matching Greenhouse postings in the current batch. To check an individual packet again, choose **Check public Greenhouse questions** on that packet. Mosaic reads the employer’s published required custom questions over a public GET. Answer in the inbox and use the saved answers shown in the packet’s question summary when completing the employer form yourself. Checking a packet requires a verified local application profile. The [Greenhouse Job Board API](https://docs.greenhouse.io/job-board.html) can expose a different subset of questions from the live form.
 
 **Automatic mode.** Within an already authorized native workflow, saving the final missing answer wakes the worker for the affected applications. Other postings can continue while a question waits. The worker verifies each live form and rechecks the applicable saved answers before submitting. A workspace using per-packet approval still requires that approval. A paused worker stays paused. A normal service restart recovers eligible answered work.
 

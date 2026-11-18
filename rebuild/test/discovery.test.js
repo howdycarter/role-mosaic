@@ -33,7 +33,9 @@ test('an empty successful board marks only its omitted jobs unlisted; failed sou
   const alpha = original.find(row => row.company === 'alpha');
   Object.assign(alpha, { status: 'interview', note: 'private note', receiptId: 'receipt' });
   await store.write('jobs.json', original);
-  const partial = await scanBoards({ store, fetcher: async url => url.includes('/alpha/') ? ok([]) : new Response('', { status: 503 }) });
+  const progress = [];
+  const partial = await scanBoards({ store, onProgress: update => progress.push(update), fetcher: async url => url.includes('/alpha/') ? ok([]) : new Response('', { status: 503 }) });
+  assert.deepEqual(progress, [{ completed: 0, total: 2 }, { completed: 2, total: 2 }]);
   assert.deepEqual([partial.status, partial.fetched, partial.unlisted, partial.lastFullScanAt], ['partial', 0, 1, first.at]);
   const latest = await store.read('jobs.json', []);
   assert.equal(latest.find(row => row.company === 'alpha').listingState, 'unlisted');

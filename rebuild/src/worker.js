@@ -5,6 +5,7 @@ import {evaluate,historyMatch,reapplicationHistory} from './core.js';
 import {scanBoards} from './discovery.js';
 import {campaignProgress} from './campaign.js';
 import {readGreenhouseInbox} from './greenhouse-inbox.js';
+import {checkRunQuestions} from './manual-greenhouse-questions.js';
 import {prepareQualityPackets} from './packets.js';
 
 export const workerDefaults={enabled:false,intervalMinutes:30,maxInspections:15,headless:false,channel:'chrome',autoSubmitApproved:true};
@@ -12,7 +13,7 @@ export class MosaicWorker {
  constructor({home,adapterFactory,fetcher=fetch}={}){
   this.home=home;this.store=new ApplicationStore(home);this.fetcher=fetcher;
   this.adapterFactory=adapterFactory|| (async config=>{const {PlaywrightApplicationAdapter}=await import('./playwright-adapter.js');return PlaywrightApplicationAdapter.launch({home,...config});});
-  this.adapter=null;this.timer=null;this.running=false;this.paused=false;this.status={state:'stopped',transport:'playwright',lastRun:null,error:null};
+  this.adapter=null;this.timer=null;this.running=false;this.paused=false;this.pauseRevision=0;this.status={state:'stopped',transport:'playwright',lastRun:null,error:null};
  }
  async config(){const c={...workerDefaults,...await this.store.read('worker.json',{})};if(!Number.isFinite(c.intervalMinutes)||c.intervalMinutes<1||c.intervalMinutes>1440||!Number.isInteger(c.maxInspections)||c.maxInspections<1||c.maxInspections>30||!['chrome','chromium'].includes(c.channel))throw Error('Invalid worker configuration');return c;}
  async browser(){if(!this.adapter){if(!this.adapterPromise)this.adapterPromise=this.config().then(c=>this.adapterFactory(c));try{this.adapter=await this.adapterPromise;}finally{this.adapterPromise=null;}}return this.adapter;}
@@ -24,10 +25,13 @@ export class MosaicWorker {
   await this.pause();this.status.state='complete';this.status.stage='campaign target reached';return true;
  }
  async start(){const c=await this.config();this.paused=false;await this.store.write('worker.json',{...c,enabled:true});clearInterval(this.timer);this.timer=setInterval(()=>{this.cycle().catch(()=>{});},c.intervalMinutes*60000);this.timer.unref?.();this.status.state='idle';await this.persist();return this.cycle();}
- async pause(){this.paused=true;clearInterval(this.timer);this.timer=null;await this.store.write('worker.json',{...await this.config(),enabled:false});this.status.pauseRequested=this.running;this.status.state=this.running?'pausing':'paused';await this.persist();return this.status;}
+ async pause(){this.pauseRevision++;this.paused=true;clearInterval(this.timer);this.timer=null;await this.store.write('worker.json',{...await this.config(),enabled:false});this.status.pauseRequested=this.running;this.status.state=this.running?'pausing':'paused';await this.persist();return this.status;}
  async stop(){await this.pause();if(this.running)throw Error('Worker is finishing its current operation; browser preserved');if(this.adapter)await this.adapter.close();this.adapter=null;}
  async discover(){
-  this.status.discovery=await scanBoards({store:this.store,fetcher:this.fetcher,shouldStop:()=>this.paused});
+  this.status.discovery=await scanBoards({
+   store:this.store,fetcher:this.fetcher,shouldStop:()=>this.paused,
+   onProgress:progress=>{this.status.boardProgress=progress;},
+  });
   await this.persist();
   if(this.status.discovery.status==='failed')throw Error('All employer sources failed; saved jobs preserved');
  }
@@ -80,25 +84,55 @@ export class MosaicWorker {
    this.persist().catch(()=>{});
   }));
  }
- async cycle({discover=true,prepare=true,submit=true,jobIds,inboxOnly=false}={}){
+ // A click is acknowledged once this process owns the workspace and has published its run state.
+ // The cycle outlives the HTTP request. Later failures remain visible through worker status.
+ runOnce({jobIds,submissionMode}={}){
+  const started=Promise.withResolvers();
+  this.cycle({jobIds,expectedMode:submissionMode,onStarted:started.resolve}).catch(started.reject);
+  return started.promise;
+ }
+ async cycle({discover=true,prepare=true,submit=true,jobIds,inboxOnly=false,expectedMode,onStarted}={}){
   if(this.running)throw Error('Worker already running');
+  const pauseRevision=this.pauseRevision;
   this.running=true;
   const lock=path.join(this.home,'worker-run.lock');let handle;
   try{handle=await open(lock,'wx',0o600);}catch(e){this.running=false;if(e.code==='EEXIST')throw Error('Another worker owns this workspace; inspect its state before recovery');throw e;}
-  this.status={...this.status,state:'running',stage:'starting',error:null,startedAt:new Date().toISOString()};await handle.writeFile(JSON.stringify({pid:process.pid,startedAt:this.status.startedAt}));await handle.close();
+  let started=false,clickMode;
   try{
-   const config=await this.config();await this.persist();
-   if(await this.stopAtTarget())return this.status;
+   const config=await this.config();
+   if(onStarted){
+    const policy=await this.store.read('application-policy.json',{});
+    clickMode=policy.submissionMode==='automatic'?'automatic':'manual';
+    if(expectedMode && clickMode!==expectedMode)throw Error('Submission mode changed. Refresh the dashboard before starting another run.');
+    if(this.pauseRevision===pauseRevision)this.paused=false;
+   }
+   const startedAt=new Date().toISOString();
+   await handle.writeFile(JSON.stringify({pid:process.pid,startedAt}));
+   this.status={state:'running',transport:'playwright',stage:'starting',error:null,lastRun:this.status.lastRun,startedAt};
+   started=true;await this.persist();onStarted?.({startedAt,submissionMode:clickMode});
+   // Campaign targets stop automated application work. A manual Run only reads boards
+   // and prepares local materials, so a completed submission campaign does not stop it.
+   if(clickMode!=='manual' && await this.stopAtTarget())return this.status;
    const notion=await this.store.read('notion-connection.json',{});
    if(!inboxOnly&&notion.enabled&&!this.paused){this.status.stage='Notion sync';await this.persist();const {syncNotion}=await import('./notion-sync.js');this.status.notion=await syncNotion({home:this.home,fetcher:this.fetcher});}
    if(discover&&!this.paused){this.status.stage='discovery';await this.persist();await this.discover();}
    if(this.paused){this.status.state='paused';this.status.stage='paused before application work';return this.status;}
    const executionPolicy=await this.store.read('application-policy.json',{});
    if(inboxOnly && (!executionPolicy.enabled || executionPolicy.submissionMode!=='automatic' || executionPolicy.automationRiskAcknowledged!==true)){this.status.state='idle';return this.status;}
-   if(executionPolicy.submissionMode!=='automatic'){
+   const mode=executionPolicy.submissionMode==='automatic'?'automatic':'manual';
+   if(clickMode && clickMode!==mode)throw Error('Submission mode changed during the run. Refresh the dashboard and run again.');
+   if(mode==='manual'){
     this.status.stage='preparing local evidence packets';this.status.submissionMode='manual';await this.persist();
-    const result=prepare?await prepareQualityPackets({home:this.home,jobIds,limit:config.maxInspections}):await this.store.read('quality-packets.json',{packets:[]});
-    this.status.qualityPackets={count:result.packets.length,ready:result.packets.filter(p=>p.quality.ready).length};this.status.plan={prepared:this.status.qualityPackets.ready,held:result.packets.filter(p=>!p.quality.ready).map(p=>({id:p.job.id,company:p.job.company,title:p.job.title,reason:p.quality.reasons.join('; ')}))};this.status.state='idle';this.status.stage='finished';this.status.lastRun=new Date().toISOString();return this.status;
+    const result=prepare?await prepareQualityPackets({home:this.home,jobIds,limit:config.maxInspections,matchesOnly:clickMode==='manual'}):await this.store.read('quality-packets.json',{packets:[]});
+    const ready=result.packets.filter(p=>p.quality.ready).length;
+    this.status.qualityPackets={count:result.packets.length,ready};
+    this.status.plan={prepared:ready,held:result.packets.filter(p=>!p.quality.ready).map(p=>({id:p.job.id,company:p.job.company,title:p.job.title,reason:p.quality.reasons.join('; ')}))};
+    if(clickMode==='manual' && prepare && !this.paused){
+     this.status.stage='checking public Greenhouse questions';await this.persist();
+     this.status.inboxChecks=await checkRunQuestions({store:this.store,packets:result.packets,fetcher:this.fetcher,shouldStop:()=>this.paused});
+    }
+    this.status.state=this.paused?'paused':'idle';this.status.stage=this.paused?'paused':'finished';
+    this.status.lastRun=new Date().toISOString();return this.status;
    }
    if(executionPolicy.automationRiskAcknowledged!==true)throw Error('Automatic browser submission requires explicit acknowledgement that automation is detectable');
    const adapter=await this.browser();
@@ -161,8 +195,11 @@ export class MosaicWorker {
    if(await this.stopAtTarget())return this.status;
    this.status.plan={prepared:plan.packets.filter(p=>!ledger.some(a=>a.packetDigest===p.digest)&&Date.parse(p.expiresAt)>Date.now()).length,held:plan.held};
    this.status.lastRun=new Date().toISOString();this.status.state=this.paused?'paused':'idle';this.status.stage='finished';return this.status;
-  }catch(e){this.status.state='error';this.status.error=String(e.message).slice(0,300);throw e;}
-  finally{try{await this.persist();await unlink(lock);}finally{this.running=false;this.wakeQueuedInbox();}}
+  }catch(e){if(started){this.status.state='error';this.status.error=String(e.message).slice(0,300);}throw e;}
+  finally{
+   try{if(started)await this.persist();}
+   finally{try{await handle.close();await unlink(lock);}finally{this.running=false;this.wakeQueuedInbox();}}
+  }
  }
  async resume(attemptId){
   if(this.running)throw Error('Worker already running');

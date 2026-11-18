@@ -10,7 +10,7 @@
     "test": "node --test",
     "start": "node src/cli.js",
     "app": "node src/server.js",
-    "test:browser": "MOSAIC_BROWSER_TESTS=1 node --test test/standalone-browser.test.js test/greenhouse-inbox-browser.test.js"
+    "test:browser": "MOSAIC_BROWSER_TESTS=1 node --test test/*-browser.test.js"
   },
   "dependencies": {
     "playwright": "^1.65.0"

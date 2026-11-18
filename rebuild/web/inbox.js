@@ -180,6 +180,7 @@
   });
   const sync = () => refresh().catch(error => { notice.textContent = error.message; });
   window.addEventListener('focus', sync);
+  window.addEventListener('mosaic-run-finished', sync);
   setInterval(() => { if (!document.hidden) sync(); }, 6000);
   sync();
 })();

@@ -54,6 +54,16 @@ const server=http.createServer(async(req,res)=>{
   }
   if(req.method==='GET'&&req.url==='/api/inbox')return send(200,await inboxView());
   if(req.method==='GET'&&req.url.startsWith('/api/packet?')){const id=new URL(req.url,'http://'+req.headers.host).searchParams.get('id');if(!/^[a-f0-9]{64}$/.test(id||''))return send(400,{error:'Invalid packet identifier'});let html;try{html=packetHtml(await refreshPacket(home,JSON.parse(await readFile(path.join(home,'packets',id+'.json'),'utf8'))))}catch(e){if(e.code==='ENOENT')return send(404,{error:'Packet not found'});throw e}res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"});res.end(html);return;}
+  if(req.method==='GET'&&req.url==='/api/worker/status'){
+   const policy=await read('application-policy.json',{}), w=worker.status;
+   const summary={state:w.state,stage:w.stage,startedAt:w.startedAt,lastRun:w.lastRun,error:w.error,
+    qualityPackets:w.qualityPackets,inboxChecks:w.inboxChecks,
+    boardProgress:w.stage==='discovery'?w.boardProgress:undefined};
+   if(w.discovery)summary.discovery={startedAt:w.discovery.startedAt,succeeded:w.discovery.succeeded,boards:w.discovery.boards,added:w.discovery.added};
+   if(w.plan)summary.plan={prepared:w.plan.prepared,heldCount:w.plan.held?.length||0};
+   if(w.campaign)summary.campaign={complete:w.campaign.complete};
+   return send(200,{busy:busy||worker.running,submissionMode:policy.submissionMode==='automatic'?'automatic':'manual',worker:summary});
+  }
   if(req.method==='GET'&&req.url==='/api/health') {
    try {
     const [policy,workerConfig,ledger,history]=await Promise.all([read('application-policy.json',{}),read('worker.json',{}),read('application-ledger.json',[]),read('history.json',[])]);
@@ -118,7 +128,17 @@ const server=http.createServer(async(req,res)=>{
     }
     if(req.url==='/api/prepare-packets'){const data=await body(req),r=await prepareQualityPackets({home,jobIds:data.jobIds,limit:data.limit||15});return send(200,{submissionMode:'manual',output:`Prepared ${r.packets.length} local evidence packets; nothing was sent to employers.`});}
     if(req.url==='/api/worker/start'){runWorker(worker.start());return send(202,{output:'Mosaic worker started using your configured application authorization mode.'});}
-    if(req.url==='/api/worker/run'){const data=await body(req);if(data.jobIds&&(!Array.isArray(data.jobIds)||data.jobIds.length>30||data.jobIds.some(x=>typeof x!=='string')))return send(400,{error:'Invalid job selection'});worker.paused=false;runWorker(worker.cycle({jobIds:data.jobIds}));return send(202,{output:'Mosaic is searching and preparing applications in its own browser.'});}
+    if(req.url==='/api/worker/run'){
+     const {jobIds,submissionMode}=await body(req);
+     if(jobIds!==undefined && (!Array.isArray(jobIds)||jobIds.length>30||jobIds.some(x=>typeof x!=='string')))return send(400,{error:'Invalid job selection'});
+     if(submissionMode!==undefined && !['manual','automatic'].includes(submissionMode))return send(400,{error:'Invalid submission mode'});
+     try{
+      const run=await worker.runOnce({jobIds,submissionMode});
+      return send(202,{...run,output:'Mosaic started one run with your current search rules.'});
+     }catch(error){
+      return send(/already running|owns this workspace|mode changed/i.test(error.message)?409:500,{error:error.message});
+     }
+    }
     if(req.url==='/api/application-run'){worker.paused=false;runWorker(worker.cycle({discover:false,prepare:false,submit:true}));return send(202,{output:'Mosaic is running approved application packets.'});}
     if(req.url==='/api/application-resume'){const data=await body(req);if(typeof data.attemptId!=='string')return send(400,{error:'Choose a held attempt'});runWorker(worker.resume(data.attemptId));return send(202,{output:'Continuing the selected pre-submit draft; unknown submissions are never retried.'});}
     if(req.url==='/api/application-reconcile')return send(200,await worker.reconcileReceipts());
