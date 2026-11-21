@@ -1,3 +1,4 @@
+import {recruiterflowRoute,inspectRecruiterflow,guardRecruiterflow,fillRecruiterflowMonth,confirmRecruiterflow} from './recruiterflow.js';
 import {inspectAshbyGroups} from './ashby-form-groups.js';
 import {attachMongoSurvey,observeMongoSurvey,fillVoluntarySurveyField} from './mongo-voluntary-survey.js';
 import {enrichGreenhouseFields} from './greenhouse-public-form.js';
@@ -51,6 +52,7 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   if(tabId&&!existing)throw Error('Preserved application page unavailable; no new form was opened');
   const tab=existing||await this.nativeTabs.new();
   if(!existing)await tab.goto(embed?.url||job.url);
+  if(recruiterflowRoute(job.url))return inspectRecruiterflow({job,tab,uploaded:this.uploads[job.id]?.filename,allowAnnual:rules.allowAnnualBaseAssumption===true});
   await tab.page.locator(embed?'form#application-form':'h1').first().waitFor({state:'visible'});
   if(embed)await verifyMongoForm(tab.page,job);
   if(embeddedEvidence?.survey) {
@@ -137,6 +139,7 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   const checkDestination=async()=>{
    if(!samePosting(tab.page.url(),inspection.job.url))throw Error('Application destination changed');
    await verifyMongoForm(tab.page,inspection.job);
+   await guardRecruiterflow(tab.page,inspection.job,this.uploads[inspection.job.id]?.filename);
   };
   for(const {field,value} of actions){
    await checkDestination();
@@ -149,6 +152,7 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
    if(field.type==='select' && field.committedChoices>1)throw Error('Multiple existing selections require review');
    if((field.type!=='select' || field.committedChoices===1) && field.value && sameAnswer(field,field.value,value))continue;
    const control=this.locator(tab,field);
+   if(field.experienceKey && await fillRecruiterflowMonth(field,control,value))continue;
    if(field.type==='radio-choice'){
     const choice=optionForAnswer(field,value,field.options||[]);if(!choice)throw Error('No radio option matches the verified applicant answer');await control.getByRole('radio',{name:choice,exact:true}).check();
    }else if(field.type==='button-choice'){
@@ -186,6 +190,7 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
  async submit(inspection){
   const page=inspection.tab.page;await page.bringToFront();
   await verifyMongoForm(page,inspection.job);
+  await guardRecruiterflow(page,inspection.job,this.uploads[inspection.job.id]?.filename);
   if(!samePosting(page.url(),inspection.job.url))throw Error('Application destination changed');
   const events=[];this.submissionEvidence={at:new Date().toISOString(),jobId:inspection.job.id,events};
   const record=(request,status)=>{try{const url=new URL(request.url());if(events.length<40&&['POST','PUT'].includes(request.method()))events.push({origin:url.origin,path:url.pathname,method:request.method(),status});}catch{}};
@@ -194,7 +199,7 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   try{await super.submit(inspection);}catch(e){this.clearSubmissionListeners();throw e;}
  }
  async confirm(inspection,options){
-  try{const result=await super.confirm(inspection,options);const emailVerificationPending=!result.confirmed&&await inspection.tab.page.evaluate(()=>Array.from({length:8},(_,n)=>document.getElementById('security-input-'+n)).every(e=>e&&e.getClientRects().length>0));return {...result,emailVerificationPending,transportEvidence:this.submissionEvidence?.jobId===inspection.job.id?this.submissionEvidence:undefined};}finally{this.clearSubmissionListeners?.();this.clearSubmissionListeners=null;}
+  try{const result=recruiterflowRoute(inspection.job.url)?await confirmRecruiterflow({...inspection,home:this.home},options):await super.confirm(inspection,options);const emailVerificationPending=!result.confirmed&&await inspection.tab.page.evaluate(()=>Array.from({length:8},(_,n)=>document.getElementById('security-input-'+n)).every(e=>e&&e.getClientRects().length>0));return {...result,emailVerificationPending,transportEvidence:this.submissionEvidence?.jobId===inspection.job.id?this.submissionEvidence:undefined};}finally{this.clearSubmissionListeners?.();this.clearSubmissionListeners=null;}
  }
  preservedPage(attempt,{exact=false}={}){
   const matches=p=>{try{return !p.isClosed()&&samePosting(p.url(),attempt.url);}catch{return false}};

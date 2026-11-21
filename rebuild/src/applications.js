@@ -1,3 +1,4 @@
+import {recruiterflowRoute,recruiterflowExperience} from './recruiterflow.js';
 import {isAshbyRecruitmentNotice} from './ashby-recruitment-privacy.js';
 import {cleanField} from './posting-permission.js';
 import {mongoEmbedRoute} from './greenhouse-embed.js';
@@ -55,12 +56,13 @@ export function postingKey(raw) {
  return canonical(raw);
 }
 export function supportedPosting(url) {
- if(mongoEmbedRoute(url))return true;
+ if(recruiterflowRoute(url) || mongoEmbedRoute(url))return true;
  try{const u=new URL(url);return u.protocol==='https:'&&!u.username&&!u.password&&['job-boards.greenhouse.io','boards.greenhouse.io','jobs.ashbyhq.com','jobs.lever.co'].includes(u.hostname);}catch{return false;}
 }
 export function samePosting(a,b){
  try{
   const left=new URL(a),right=new URL(b);
+  if([left.hostname,right.hostname].includes('recruiterflow.com'))return !!recruiterflowRoute(a) && recruiterflowRoute(a).posting===recruiterflowRoute(b)?.posting;
   if(mongoEmbedRoute(a)||mongoEmbedRoute(b)){
    const intended=greenhousePosting(a),observed=greenhousePosting(b);
    return !!intended && !!observed && intended.key===observed.key;
@@ -96,7 +98,9 @@ export function salaryForLocation(text,state) {
 function inspectionSalary(inspection,state){
  const text=salaryForLocation(inspection.description,state);if(text?.region)return text;
  const pay=inspection.compensation,e=inspection.publicEvidence;
- if(e&&samePosting(e.posting,inspection.job.url)&&/^https:\/\/(?:api\.ashbyhq\.com|boards-api\.greenhouse\.io)\//.test(e.sourceUrl||'')&&pay?.currency==='USD'&&pay.interval==='year'&&Number.isFinite(pay.min)&&Number.isFinite(pay.max)&&pay.max>=pay.min)return pay.lowestTierMaximum!==undefined?pay:text||pay;
+ const recruiter=recruiterflowRoute(inspection.job?.url);
+ if(recruiter && e?.posting===recruiter.posting && e.sourceUrl===recruiter.posting && pay?.currency==='USD' && pay.interval==='year' && Number.isSafeInteger(pay.min) && pay.max===pay.min)return pay;
+ if(e&&samePosting(e.posting,inspection.job?.url)&&/^https:\/\/(?:api\.ashbyhq\.com|boards-api\.greenhouse\.io)\//.test(e.sourceUrl||'')&&pay?.currency==='USD'&&pay.interval==='year'&&Number.isFinite(pay.min)&&Number.isFinite(pay.max)&&pay.max>=pay.min)return pay.lowestTierMaximum!==undefined?pay:text||pay;
  return text;
 }
 export function formDigest(form) {
@@ -162,7 +166,7 @@ export function fillPlan(form,profile,{postingKey:scope,company,inboxAnswer,job,
   if(field.type==='select'&&/^(?:location(?: \(city\))?|current location|what location do you intend to work from\?)\*?$/i.test(field.label.trim()))field.locationKnown={city:profile.facts.city,state:profile.facts.state,stateCode:profile.facts.stateCode,country:profile.facts.country};
   const authorized=permission?.fields.find(f=>f.id===field.id && f.type===field.type && f.label===cleanField(field.label));
   if(isAshbyRecruitmentNotice(job,field) && authorized?.kind!=='recruitment-privacy'){if(field.required)missing.push(field.label);continue;}
-  let value=authorized?.answer ?? answerFor(field,profile);
+  let value=field.experienceKey ? undefined : authorized?.answer ?? answerFor(field,profile);
   if(field.required && (value===undefined || value===null || value==='') && inboxAnswer) {
    value=inboxAnswer(field);
    if(value!==undefined && value!==null && value!=='') {
@@ -216,7 +220,7 @@ async function prerequisites(store,now,updatedPolicy) {
 function duplicate(job,history,attempts,reviews=[]) {
  history=reapplicationHistory(job,history,reviews);
  const key=postingKey(job.url);
- return !!historyMatch(job,history)||history.some(r=>{try{return r.posting&&postingKey(r.posting)===key;}catch{return false;}})||attempts.some(a=>a.postingKey===key&&a.status!=='preflight_hold');
+ return !!historyMatch(job,history)||history.some(r=>{try{return r.posting&&postingKey(r.posting)===key;}catch{return false;}})||attempts.some(a=>a.status!=='preflight_hold' && (a.postingKey===key || !a.postingKey && (a.jobId===job.id || samePosting(a.url,job.url))));
 }
 function restartScope(ctx){return digest({resume:ctx.resumeSha256,profile:ctx.profileSha256,search:ctx.searchSha256,authorization:ctx.policy.standingAuthorization});}
 async function restartException(store,id,job,ctx,attempts,adapter,at,currentAttemptId){
@@ -311,6 +315,10 @@ export async function configureStandingAuthorization({home,evidence,enabled=true
 async function applicationFillPlan(store, job, form, ctx, adapter) {
  const scope = {postingKey:postingKey(job.url),company:job.company};
  let permission;
+ if(adapter.transport==='playwright' && recruiterflowRoute(job.url)) {
+  const experience=await recruiterflowExperience(store,job,ctx);
+  scope.inboxAnswer=field=>Object.hasOwn(experience,field.experienceKey)?experience[field.experienceKey]:undefined;
+ }
  if(adapter.transport==='playwright' && applicationPosting(job.url)){
   scope.job=job;
   const state=await readGreenhouseAnswers(store);
@@ -411,6 +419,9 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
    if(!standingAuthorizationMatches(ctx.policy,scope,adapter))throw Error('Fresh held draft requires current native standing authorization');
    const restart=job&&await restartException(store,held.restartAuthorizationId,job,ctx,ledger,adapter,now(),held.id);
    if(!job||job.listingState==='unlisted'||held.restartAuthorizationId&&!restart||['applied','dismissed','rejected'].includes(job.status)||!restart&&duplicate(job,ctx.history,ledger.filter(a=>a.id!==held.id),ctx.reapplicationReviews))throw Error('Held draft is no longer eligible');
+   if(recruiterflowRoute(job.url) && (held.finalActionAt || held.receipt || held.verificationCheckpoint ||
+       held.resumeSha256!==ctx.resumeSha256 || held.url!==job.url))throw Error('Recruiterflow draft has uncertain final action or changed identity');
+   if(recruiterflowRoute(job.url) && !held.postingKey)held.postingKey=postingKey(job.url);
    const original=adapter.preservedPage?.(held,{exact:true});
    if(original && held.browserEvidence?.resumeUpload?.sha256===ctx.resumeSha256)adapter.restoreEvidence?.(job.id,held.browserEvidence);
    const inspection=original ? await adapter.inspect(job,{tabId:held.tabId}) : await adapter.inspect(job);
