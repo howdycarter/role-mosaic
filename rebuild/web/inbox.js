@@ -103,6 +103,36 @@
     return form;
   }
 
+  function permissionCard(item) {
+    const section=element('section'), group=element('fieldset');
+    group.append(element('legend',item.company+' · '+item.title),
+      element('p','Use these previous answers and privacy choices for this application?'));
+    const fields=element('dl');
+    for(const field of item.fields){
+      fields.append(element('dt',field.label),element('dd',field.answer==='true'?'Check the consent box':field.answer));
+      if(field.help)fields.append(element('dd',field.help));
+      for(const raw of field.links||[]){
+        let url;try{url=new URL(raw);}catch{continue;}
+        if(url.protocol!=='https:'||url.username||url.password)continue;
+        const link=element('a',url.hostname+url.pathname);link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';
+        const line=element('dd');line.append(link);fields.append(line);
+      }
+    }
+    group.append(fields);
+    const actions=element('div');
+    for(const [decision,title] of [['allow','Authorize these answers for this application'],['skip','Skip this application']]){
+      const button=element('button',title);button.type='button';
+      button.onclick=async()=>{
+        group.disabled=true;
+        try{const result=await api('/api/inbox/posting-permission',{id:item.id,jobId:item.jobId,revision:item.revision,decision});
+          notice.textContent=result.output;await refresh();
+        }catch(error){notice.textContent=error.message;}finally{group.disabled=false;}
+      };
+      actions.append(button);
+    }
+    group.append(actions);section.append(group);return section;
+  }
+
   let savedStamp;
   function renderSaved(answers = []) {
     const stamp = JSON.stringify(answers);
@@ -137,18 +167,19 @@
     const version = ++fetchVersion;
     const inbox = await api('/api/inbox');
     if (version !== fetchVersion) return;
-    const count = inbox.items.length;
-    const current = new Set(inbox.items.map(item => item.id));
+    const items=[...inbox.items,...(inbox.permissions||[]).map(p=>({...p,permission:true}))];
+    const count = items.length;
+    const current = new Set(items.map(item => item.id));
     for (const [id, card] of cards) {
       if (!current.has(id)) { card.node.remove(); cards.delete(id); }
     }
-    for (const item of inbox.items) {
+    for (const item of items) {
       const stamp = JSON.stringify(item);
       const old = cards.get(item.id);
       if (old?.stamp === stamp) continue;
       // Preserve input while a background refresh discovers other work.
       if (old?.node.contains(document.activeElement)) continue;
-      const node = questionCard(item);
+      const node = item.permission ? permissionCard(item) : questionCard(item);
       if (old) old.node.replaceWith(node); else list.append(node);
       cards.set(item.id, { stamp, node });
     }

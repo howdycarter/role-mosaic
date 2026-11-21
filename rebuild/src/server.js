@@ -1,5 +1,5 @@
-import {answerGreenhouseQuestion,forgetGreenhouseAnswer} from './greenhouse-inbox.js';
-import {inboxRoleReview,saveInboxRoleReview} from './inbox-role-review.js';
+import {answerGreenhouseQuestion,forgetGreenhouseAnswer,decidePostingPermission} from './greenhouse-inbox.js';
+import {inboxRoleReview,saveInboxRoleReview,saveEvidenceReplies} from './inbox-role-review.js';
 import {readDecisionInbox} from './decision-inbox.js';
 import {checkPacketQuestions,isHostedGreenhouseJob} from './manual-greenhouse-questions.js';
 import {confirmedReceipt,recordOutcome,summarizeOutcomes} from './outcomes.js';
@@ -30,7 +30,7 @@ const runWorker=work=>{work.catch(()=>{});};
 // idle refresh. Mutating endpoints and worker authorization always read disk.
 let cachedInbox;
 async function inboxView() {
- const files=['greenhouse-inbox.json','application-profile.json','application-policy.json','jobs.json','application-ledger.json','history.json','application-plan.json','quality-packets.json','reapplication-reviews.json'];
+ const files=['greenhouse-inbox.json','application-profile.json','application-policy.json','jobs.json','application-ledger.json','history.json','application-plan.json','quality-packets.json','reapplication-reviews.json','evidence-replies.json'];
  const versions=await Promise.all(files.map(async file=>{
   try{
    const info=await stat(path.join(home,file),{bigint:true});
@@ -115,6 +115,14 @@ const server=http.createServer(async(req,res)=>{
      return send(/stale|changed|already|lock|another|refresh|no longer/i.test(error.message)?409:400,{error:error.message});
     }
    }
+   if(req.url==='/api/inbox/posting-permission'){
+    try{
+     const {id,jobId,revision,decision}=await body(req);
+     const result=await decidePostingPermission({store:worker.store,id,jobId,revision,decision});
+     if(result.jobIds.length)continueInbox(result.jobIds);
+     return send(200,{output:decision==='skip'?'Application skipped.':result.jobIds.length?'Permission saved. Mosaic will recheck this application.':'Permission saved for this application.'});
+    }catch(error){return send(409,{error:error.message});}
+   }
    if(req.url==='/api/inbox/forget'){
     try{
      const {id}=await body(req);
@@ -144,6 +152,10 @@ const server=http.createServer(async(req,res)=>{
       const result=await configureStandingAuthorization({home,evidence,activate:{track:data.track,resumeSha256:data.resumeSha256,acknowledgeAutomationRisk:true}});
       return send(200,{...result,output:'Automatic submissions are ready. Click Run Mosaic to start.'});
      }catch(error){return send(/changed|owns this workspace/.test(error.message)?409:400,{error:error.message});}
+    }
+    if(req.url==='/api/inbox/evidence-replies'){
+     try { return send(200,await saveEvidenceReplies(worker.store,await body(req,100000))); }
+     catch(error){return send(409,{error:error.message});}
     }
     if(req.url==='/api/inbox/role-review'){
      try { return send(200,await saveInboxRoleReview(worker.store,await body(req,100000))); }

@@ -26,3 +26,35 @@ test('FDE has its own track and never inherits an engineering resume or evidence
  const q=assessQuality({title:'Senior Forward Deployed Engineer',description:'Customer-facing production engineering'}, {facts:[{id:'engineering',tracks:['engineering'],capabilities:[]}],caseStudies:[],digest:'source'}, {resume:{track:'engineering',status:'approved',sha256:'old'}});
  assert.equal(q.ready,false);assert.ok(q.reasons.includes('No source-backed evidence for this track'));assert.equal(q.resume.track,'engineering');
 });
+
+test('model retrieval uses scoped source evidence and keeps unrelated agent capabilities separate',async()=>{
+ const {assessQuality,roleRequirements}=await import('../src/quality.js');
+ const description='Requirements\nExperience building and deploying AI agents with tool use, orchestration, state, and failure handling; production LLM experience with retrieval, structured outputs, evaluations, monitoring, and controls.';
+ const job={title:'Senior Forward Deployed Engineer',description};
+ const fact=(id,capabilities,quote)=>({id,capabilities,tracks:['fde'],text:quote,quote});
+ const facts=[
+  fact('retrieval',['llm-retrieval-experience'],'I deployed contextual retrieval for a language model to production.'),
+  fact('agent',['production-agent-design'],'I designed production agents.'),
+  fact('code',['failure-handling'],'Source code implements fallbacks.'),
+  fact('evaluation',['evaluation-tooling'],'We evaluated a prototype. Production activation is unconfirmed.'),
+  fact('monitoring',['llm-monitoring'],'We built an LLM monitoring dashboard; we also operated a production service.'),
+  fact('different',['llm-retrieval-experience'],'I built a retrieval demo and deployed an analytics service to production.'),
+  fact('outputs',['production-llm-structured-outputs'],'I operated schema-validated LLM outputs in production.'),
+ ];
+ const assessment=assessQuality(job,{facts,caseStudies:[]},{resume:{track:'fde',status:'approved'}});
+ const requirements=new Map(assessment.requirements.map(r=>[r.suggestedCapability,r]));
+ assert.equal(requirements.has('search-systems'),false);
+ assert.deepEqual(requirements.get('production-llm-retrieval-experience').evidenceIds,['retrieval']);
+ assert.deepEqual(requirements.get('production-llm-structured-outputs').evidenceIds,['outputs']);
+ assert.deepEqual(requirements.get('deployed-failure-handling').relatedEvidenceIds,['code']);
+ assert.deepEqual(requirements.get('deployed-ai-agent-delivery').relatedEvidenceIds,['agent']);
+ assert.deepEqual(requirements.get('production-llm-monitoring').evidenceIds,[]);
+ assert.deepEqual(requirements.get('production-ai-evaluation').evidenceIds,[]);
+ assert.ok(assessment.missingRequirements.some(r=>r.suggestedCapability==='deployed-agent-state-management'));
+ assert.equal(requirements.get('production-llm-controls').text,description.split('\n')[1]);
+ assert.deepEqual(roleRequirements({...job,description:'Experience with document retrieval is required.'}),[]);
+ const both=roleRequirements({...job,description:'Experience developing search ranking infrastructure; production LLM experience with retrieval.'});
+ assert.ok(both.some(r=>r.id==='search-systems'));
+ assert.ok(both.some(r=>r.id==='production-llm-retrieval-experience'));
+ assert.deepEqual(roleRequirements({...job,description:'Required Qualifications\nExperience developing web products.\nPreferred Qualifications\nExperience with production LLM retrieval.'}),[]);
+});

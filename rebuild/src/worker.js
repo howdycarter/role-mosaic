@@ -2,7 +2,8 @@ import {open,unlink,mkdir} from 'node:fs/promises';
 import path from 'node:path';
 import {ApplicationStore,prepareApplications,runApplications,reconcileApplications,postingKey,samePosting,authorizationMatches,standingAuthorizationMatches,supportedPosting,meetsContributorRule,continueApplicationVerification} from './applications.js';
 import {canonical,createHistoryLookup,evaluate,historyMatch,reapplicationHistory} from './core.js';
-import {assessQuality,loadEvidence,roleTrack,selectTrackResume,tracks} from './quality.js';
+import {reviewWithEvidence} from './evidence-review.js';
+import {loadEvidence,roleTrack,selectTrackResume,tracks} from './quality.js';
 import {scanBoards} from './discovery.js';
 import {inspectShortlistPosting} from './shortlist.js';
 import {campaignProgress} from './campaign.js';
@@ -45,6 +46,7 @@ async function rankApplicationJobs({store,jobs,search,history,ledger,pending,job
  const historicalPostings = new Set(history.flatMap(row=>[row.postingKey,keyFor(row.posting||row.url)]).filter(Boolean));
  const reviewUrls = new Set(exceptions.map(r=>{try{return canonical(r.posting);}catch{return null;}}));
  const now = new Date(), ranked = [];
+ const reusableTracks = new Set(Object.values(reviews).map(r => r?.track).filter(Boolean));
  for(const job of jobs){
   if(job.listingState==='unlisted'||!supportedPosting(job.url)||selectedIds&&!selectedIds.has(job.id)||blockedIds.has(job.id))continue;
   const track=roleTrack(job.title),key=postingKey(job.url);
@@ -64,8 +66,9 @@ async function rankApplicationJobs({store,jobs,search,history,ledger,pending,job
   const match=fit.disposition==='match',resume=exact.get(track);
   // An IC with missing specialization cannot proceed, but a matching posting must reach the review inbox.
   if(!ic&&!match&&!boundTrack)continue;
-  const qualityReady=!!(resume && review && assessQuality(job,evidence,{resume,review,now}).ready);
-  ranked.push({job,key,urgent,ready:qualityReady&&ic,exact:!!resume,match,last,score:fit.score+(/\bremote\b/i.test(job.location)?5:0)});
+  const fitReview=resume && (review || reusableTracks.has(track)) ? reviewWithEvidence(job,evidence,resume,reviews,now) : null;
+  const preferenceKnown=boundTrack===track && grant?.enabled && fitReview?.handsOnPreference;
+  ranked.push({job,key,urgent,ready:!!(fitReview?.assessment.ready&&(ic||preferenceKnown)),exact:!!resume,match,last,score:fit.score+(/\bremote\b/i.test(job.location)?5:0)});
  }
  ranked.sort((a,b)=>Number(b.urgent)-Number(a.urgent)||Number(b.ready)-Number(a.ready)||
   Number(b.exact)-Number(a.exact)||Number(b.match)-Number(a.match)||a.last-b.last||b.score-a.score);
@@ -223,7 +226,9 @@ export class MosaicWorker {
    let plan=await this.store.read('application-plan.json',{packets:[],held:[]});
    let ledger=await this.store.read('application-ledger.json',[]);
    const now=new Date(),approvals=await this.store.read('application-approvals.json',[]),policy=await this.store.read('application-policy.json',{});
-   const authorized=plan.packets.filter(p=>(!jobIds||jobIds.includes(p.job.id))&&Date.parse(p.expiresAt)>now.getTime()&&!ledger.some(a=>a.packetDigest===p.digest)&&(standingAuthorizationMatches(policy,p,adapter)||approvals.some(a=>authorizationMatches(a,p,now))));
+   const selectedJobs=jobIds && new Set(jobIds);
+   const inScope=packet=>!selectedJobs || selectedJobs.has(packet.job.id);
+   const authorized=plan.packets.filter(p=>inScope(p)&&Date.parse(p.expiresAt)>now.getTime()&&!ledger.some(a=>a.packetDigest===p.digest)&&(standingAuthorizationMatches(policy,p,adapter)||approvals.some(a=>authorizationMatches(a,p,now))));
    const recheckIds=new Set();
    if(submit&&config.autoSubmitApproved&&authorized.length&&!this.paused){
     this.status.stage='approved applications';await this.persist();
@@ -260,7 +265,12 @@ export class MosaicWorker {
      for(const job of candidates){seen[job.id]=at;seen[postingKey(job.url)]=at;}
      await this.store.write('worker-inspected.json',seen);
      const journal=await this.store.read('application-preflight-history.json',[]);journal.push({at:new Date().toISOString(),held:plan.held,prepared:plan.packets.map(p=>({id:p.id,company:p.job.company,title:p.job.title}))});await this.store.write('application-preflight-history.json',journal);
-     if(submit&&config.autoSubmitApproved&&!this.paused){for(const packet of plan.packets){if(!await this.canContinue())break;if(standingAuthorizationMatches(await this.store.read('application-policy.json',{}),packet,adapter))await runApplications({home:this.home,adapter,packetIds:[packet.id],shouldContinue:()=>this.canContinue()});}}
+     if(submit&&config.autoSubmitApproved&&!this.paused){
+      for(const packet of plan.packets.filter(inScope)){
+       if(!await this.canContinue())break;
+       if(standingAuthorizationMatches(await this.store.read('application-policy.json',{}),packet,adapter))await runApplications({home:this.home,adapter,packetIds:[packet.id],shouldContinue:()=>this.canContinue()});
+      }
+     }
     }
    }
    plan=await this.store.read('application-plan.json',{packets:[],held:[]});

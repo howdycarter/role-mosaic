@@ -28,9 +28,9 @@ function renderInboxReview(row, api, refresh) {
   if (row.kind==='evidence') {
     if (/^[0-9a-f]{64}$/.test(row.packetId||'')) link(actions,'Open evidence packet','/api/packet?id='+row.packetId);
     const editor=el('div'); item.append(editor);
-    action(actions,'Review this role',async () => {
+    action(actions,row.focusedEvidence?'Answer questions':'Review this role',async () => {
       const review = await api('/api/inbox/role-review?jobId='+encodeURIComponent(row.jobId));
-      editor.replaceChildren(roleForm(review));
+      editor.replaceChildren(row.focusedEvidence ? answerForm(review) : roleForm(review));
       editor.querySelector('textarea, input')?.focus();
     });
   }
@@ -54,6 +54,26 @@ function renderInboxReview(row, api, refresh) {
     if(row.kind==='form')item.append(el('p','Complete these fields directly on the employer form. If you submit there, record the outcome in Opportunities before running Mosaic again.'));
   }
   return item;
+
+  function answerForm(review) {
+    const form=el('form');
+    if (!review.applicantQuestions.length) return el('p','These questions have already been answered or resolved.');
+    const inputs=review.applicantQuestions.map(question=>{
+      const input=field(form,question,el('textarea'));input.maxLength=5000;
+      return {question,input};
+    });
+    const submit=el('button','Save answers');submit.type='submit';form.append(submit);
+    form.onsubmit=async event=>{
+      event.preventDefault();submit.disabled=true;
+      try{
+        const answers=inputs.map(({question,input})=>({question,answer:input.value.trim()})).filter(row=>row.answer);
+        if(!answers.length)throw Error('Enter at least one answer.');
+        const result=await api('/api/inbox/evidence-replies',{jobId:review.jobId,revision:review.revision,answers});
+        form.replaceWith(el('p',result.output));await refresh();
+      }catch(error){message.textContent=error.message;}finally{submit.disabled=false;}
+    };
+    return form;
+  }
 
   function roleForm(review) {
     const form=el('form'), job=el('details'), body=el('pre',review.description);

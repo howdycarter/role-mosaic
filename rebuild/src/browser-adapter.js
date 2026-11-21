@@ -38,15 +38,17 @@ export class CodexBrowserAdapter {
     const selected=e.closest('[class*="select__control"]')?.querySelector('[class*="single-value"], [class*="singleValue"]');
     const countryFlag=selected?.querySelector('[class*="iti__flag"]')?.className.match(/\biti__([a-z]{2})\b/)?.[1];
     const label=(labels.join(' ')||e.getAttribute('aria-label')||aria||parent?.querySelector('label')?.textContent||'').replace(/\s+/g,' ').trim();
-    let description='';
+    let description='',policyLinks=[];
     if(['boards.greenhouse.io','job-boards.greenhouse.io'].includes(location.hostname)) {
      const descriptions=(e.getAttribute('aria-describedby')||'').split(/\s+/).filter(Boolean)
       .map(id=>document.getElementById(id)?.textContent?.trim()).filter(Boolean);
      const help=parent?.querySelector('.field-description,.description,[data-testid="field-description"]')?.textContent?.trim();
      if(help)descriptions.push(help);
      description=[...new Set(descriptions)].join(' ');
+     const context=[...(e.labels||[]),parent,...(e.getAttribute('aria-describedby')||'').split(/\s+/).map(id=>document.getElementById(id))].filter(Boolean);
+     policyLinks=[...new Set(context.flatMap(node=>[...node.querySelectorAll('a[href]')].map(a=>a.href)).filter(h=>h.startsWith('https://')))].sort();
     }
-    return {id:e.id,label,...(description?{description}:{}),triggerSelector:e.type==='file'&&e.id&&e.parentElement.querySelector('button')?e.parentElement.tagName.toLowerCase()+':has(> input#'+CSS.escape(e.id)+') > button':null,type:e.type==='file'?'file':e.tagName==='SELECT'||e.getAttribute('role')==='combobox'?'select':e.type||'text',required:e.required||e.getAttribute('aria-required')==='true'||/\*/.test(label),value:e.type==='file'?'':e.id==='country'&&countryFlag==='us'?'United States':e.value||selected?.textContent?.trim()||'',options:e.tagName==='SELECT'?[...e.options].map(o=>o.textContent.trim()):[]};
+    return {id:e.id,label,...(description?{description}:{}),...(policyLinks.length?{policyLinks}:{}),triggerSelector:e.type==='file'&&e.id&&e.parentElement.querySelector('button')?e.parentElement.tagName.toLowerCase()+':has(> input#'+CSS.escape(e.id)+') > button':null,type:e.type==='file'?'file':e.tagName==='SELECT'||e.getAttribute('role')==='combobox'?'select':e.type||'text',required:e.required||e.getAttribute('aria-required')==='true'||/\*/.test(label),value:e.type==='file'?'':e.id==='country'&&countryFlag==='us'?'United States':e.value||selected?.textContent?.trim()||'',options:e.tagName==='SELECT'?[...e.options].map(o=>o.textContent.trim()):[]};
    });
    const buttons=[...document.querySelectorAll('button,input[type="submit"]')].filter(e=>e.getClientRects().length>0).map(e=>({label:(e.innerText||e.value||e.getAttribute('aria-label')||'').trim(),id:e.id}));
    const heading=[...document.querySelectorAll('h1,h2')].map(e=>e.textContent.trim());

@@ -1,6 +1,7 @@
 import {mkdir,readFile,writeFile,copyFile} from 'node:fs/promises';import path from 'node:path';
 import {ApplicationStore,postingKey} from './applications.js';import {evaluate,historyMatch,createHistoryLookup} from './core.js';
-import {loadEvidence,roleTrack,selectTrackResume,assessQuality,qualityDigest,jobDigest,tracks} from './quality.js';
+import {loadEvidence,roleTrack,selectTrackResume,qualityDigest,jobDigest,tracks} from './quality.js';
+import {reviewWithEvidence} from './evidence-review.js';
 import {boundedFile} from './career.js';
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 export async function registerTrackResume({home,track,file,confirm}){
@@ -20,12 +21,13 @@ export async function recordRoleReview({home,jobId,file,confirm,reviewer}){
  const store=new ApplicationStore(home),job=(await store.read('jobs.json',[])).find(j=>j.id===jobId);if(!job)throw Error('Unknown job');const data=JSON.parse(await boundedFile(file));
  const evidence=await loadEvidence(home),resume=await selectTrackResume(home,roleTrack(job.title));
  const review=makeRoleReview(job,evidence,resume,reviewer,data.requirements);
- const reviews=await store.read('quality-reviews.json',{});reviews[job.id]=review;await store.write('quality-reviews.json',reviews);return assessQuality(job,evidence,{resume,review});
+ const reviews=await store.read('quality-reviews.json',{});reviews[job.id]=review;await store.write('quality-reviews.json',reviews);return reviewWithEvidence(job,evidence,resume,reviews).assessment;
 }
 export function makeRoleReview(job,evidence,resume,reviewer,requirements){
  if(typeof reviewer!=='string'||!reviewer.trim())throw Error('Identify the reviewer');
  if(!Array.isArray(requirements)||!requirements.length||requirements.some(r=>typeof r.text!=='string'||!r.text.trim()||!['supported','unknown','contradicted'].includes(r.status)||!Array.isArray(r.evidenceIds)||r.evidenceIds.some(id=>typeof id!=='string')))throw Error('List each requirement, status and evidence IDs; leave unsupported requirements unknown');
- return {jobDigest:jobDigest(job),evidenceDigest:evidence.digest,resumeSha256:resume.sha256||null,allMandatoryReviewed:true,
+ if(requirements.some(r=>r.questions!==undefined && (!Array.isArray(r.questions) || r.questions.length>20 || r.questions.some(q=>typeof q!=='string'||!q.trim()||q.length>3000))))throw Error('Supply concise questions only for missing facts.');
+ return {track:roleTrack(job.title),jobDigest:jobDigest(job),evidenceDigest:evidence.digest,resumeSha256:resume.sha256||null,allMandatoryReviewed:true,
   reviewer:reviewer.trim(),reviewedAt:new Date().toISOString(),requirements};
 }
 export function packetHtml(packet){
@@ -55,7 +57,7 @@ export async function prepareQualityPackets({home,jobIds,limit=15,matchesOnly=fa
    try{key=postingKey(job.url);}catch{return [];}
    if(blockedPostings.has(key))return [];
   }else if(!jobIds && !(fit.matches.levels.length&&fit.matches.fields.length&&fit.matches.location.length))return [];
-  const quality=assessQuality(job,evidence,{resume:resumes.get(roleTrack(job.title)),review:reviews[job.id]});
+  const {assessment:quality}=reviewWithEvidence(job,evidence,resumes.get(roleTrack(job.title)),reviews);
   if(fit.reasons.length){quality.ready=false;quality.reasons.push(...fit.reasons);}
   return [{job,fit,quality,key}];
  }).sort((a,b)=>Number(b.quality.ready)-Number(a.quality.ready)||a.fit.reasons.length-b.fit.reasons.length||a.quality.missingRequirements.length-b.quality.missingRequirements.length||Number(!a.quality.caseStudies.length)-Number(!b.quality.caseStudies.length)||Number(!a.quality.evidenceIds.length)-Number(!b.quality.evidenceIds.length)||Number(!/director|head|vice president|\bvp\b/i.test(a.job.title))-Number(!/director|head|vice president|\bvp\b/i.test(b.job.title))||b.fit.score-a.fit.score);
@@ -74,7 +76,7 @@ export async function prepareQualityPackets({home,jobIds,limit=15,matchesOnly=fa
 /** Revalidate cached packets on every read; cached readiness is never authoritative. */
 export async function refreshPacket(home,packet,cached={}){
  const store=new ApplicationStore(home),[jobs,config,history,ledger,evidence,reviews]=await Promise.all([cached.jobs??store.read('jobs.json',[]),cached.config??store.read('search.json',{}),cached.history??store.read('history.json',[]),cached.ledger??store.read('application-ledger.json',[]),cached.evidence??loadEvidence(home),cached.reviews??store.read('quality-reviews.json',{})]);
- const job=jobs.find(j=>j.id===packet.job.id),fallback={...packet.job,description:''},current=job||fallback,resume=await selectTrackResume(home,roleTrack(current.title)),quality=assessQuality(current,evidence,{resume,review:reviews[current.id]});
+ const job=jobs.find(j=>j.id===packet.job.id),fallback={...packet.job,description:''},current=job||fallback,resume=await selectTrackResume(home,roleTrack(current.title)),quality=reviewWithEvidence(current,evidence,resume,reviews).assessment;
  const fit=job?evaluate(job,config):{reasons:['Posting no longer exists in the current job inventory']};if(fit.reasons.length){quality.ready=false;quality.reasons.push(...fit.reasons);}
  const {id,preparedAt,...payload}=packet,changed=qualityDigest(payload)!==id||qualityDigest(quality)!==qualityDigest(packet.quality)||packet.searchDigest!==qualityDigest(config);
  const attempted=job&&(['applied','dismissed','rejected'].includes(job.status)||historyMatch(job,history)||ledger.some(a=>a.jobId===job.id||a.url===job.url));

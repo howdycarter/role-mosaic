@@ -1,3 +1,15 @@
+export function employerBoardSourceAnswer(field, company) {
+ const label=String(field.label).replace(/\s*[*:]\s*$/, '').replace(/\s+/g, ' ').trim();
+ if(!/^(?:how|where) did you (?:hear about|find(?: out about)?) (?:this|the) (?:job(?: opening)?|role|position|opportunity|posting)\??$/i.test(label))return undefined;
+ if(['text','textarea'].includes(field.type))return "The employer's public Greenhouse job board.";
+ if(field.type!=='select')return undefined;
+ const normalize=value=>String(value||'').toLowerCase().replace(/[’']/g,'').replace(/\s+/g,' ').trim();
+ const prefix=normalize(company);
+ const names=new Set(['company careers page','company career page','company careers site','company website','employer website','employer careers page','greenhouse job board']);
+ if(prefix)for(const suffix of [' careers',' careers page',' careers site',' website'])names.add(prefix+suffix);
+ return field.options?.find(option=>names.has(normalize(option)));
+}
+
 export function optionForAnswer(field,answer,options){
  const value=String(answer),label=field.label.replace(/[*:]/g,'').trim().toLowerCase();
  const exact=options.find(s=>s.toLowerCase()===value.toLowerCase());if(exact)return exact;

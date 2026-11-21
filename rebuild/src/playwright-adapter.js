@@ -84,7 +84,7 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   for(const field of inspection.form.fields){
    if(inspection.location==='Remote, United States')field.countryContext='US';
    if(field.id&&!field.selector){const control=this.locator(tab,field);if(await control.count()===1){
-    const details=await control.evaluate(e=>{const entry=e.closest('.ashby-application-form-field-entry[data-field-path]'),label=entry?.querySelector('.ashby-application-form-question-title,label');const selected=e.closest('[class*="select__control"]')?.querySelector('[class*="multi-value__label"], [class*="multiValueLabel"]');return {required:!!label&&/required/i.test(label.className),selected:selected?.textContent?.trim()||''}});
+    const details=await control.evaluate(e=>{const entry=e.closest('.ashby-application-form-field-entry[data-field-path]'),label=entry?.querySelector('.ashby-application-form-question-title,label');const selected=e.closest('[class*="select__control"]')?.querySelectorAll('[class*="multi-value__label"], [class*="multiValueLabel"]');return {required:!!label&&/required/i.test(label.className),selected:Array.from(selected||[],node=>node.textContent.trim()).join(', ')}});
     field.required=field.required||details.required;if(!field.value&&details.selected)field.value=details.selected;
     if(field.type==='checkbox')field.value=String(await control.isChecked());
    }}

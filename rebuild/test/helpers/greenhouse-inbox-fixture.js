@@ -6,6 +6,11 @@ import { PlaywrightApplicationAdapter } from '../../src/playwright-adapter.js';
 
 export const notice = 'What is your notice period?';
 export const priorEmployment = 'Have you ever worked for this company?';
+export const consentChoices = [
+  {id:'privacy',label:'I have read the Candidate Privacy Policy.',answer:'I acknowledge',kind:'privacy-consent'},
+  {id:'ethnicity',label:'What is your ethnicity?',answer:'I decline to answer'},
+  {id:'data',label:'I consent to demographic data processing.',answer:'true',kind:'privacy-consent'},
+];
 export const content = 'Annual base salary $200,000 - $250,000 USD per year';
 export const location = 'Remote - United States';
 export const postings = [
@@ -20,6 +25,12 @@ export const postings = [
 ].map(row => ({ ...row, title: 'Director of Product, '+row.team,
   url: 'https://job-boards.greenhouse.io/'+row.board+'/jobs/'+row.id }));
 
+export const consentPostings = ['109','110'].map((id,index)=>({
+  id,board:'example-alpha',consents:true,title:'Director of Product, '+['Services','Operations'][index],
+  url:'https://job-boards.greenhouse.io/example-alpha/jobs/'+id,
+}));
+const fixturePostings=[...postings,...consentPostings];
+
 function apiRow(p) {
   return { id: Number(p.id), title: p.title, absolute_url: p.url, location: { name: location }, content };
 }
@@ -28,10 +39,17 @@ function form(p) {
   const field = p.question === priorEmployment
     ? '<select id="question" required><option value="">Choose an option</option><option>Yes</option><option>No</option></select>'
     : '<input id="question" required>';
+  const consentFields = p.consents ? consentChoices.map(({id,label,answer}) => {
+    const help = id === 'privacy' ? '<p id="privacy-help">Read the <a href="https://example.invalid/candidate-policy">privacy policy</a>.</p>' : '';
+    const control = id === 'data' ? '<input required id="data" type="checkbox">' :
+      `<select id="${id}" required ${help ? 'aria-describedby="privacy-help"' : ''}><option value="">Choose</option><option>${answer}</option></select>`;
+    return `<div class="field"><label for="${id}">${label}</label>${control}${help}</div>`;
+  }).join('') : '';
   return `<!doctype html><title>${p.title}</title><h1>${p.title}</h1><p>${location}</p><p>${content}</p>
     <h2>Apply for this job</h2><form>
     <label for="name">Name*</label><input id="name" required>
     ${p.question ? '<label for="question">'+p.question+'</label>'+field : ''}
+    ${consentFields}
     <label for="resume">Resume</label><input id="resume" type="file"><p id="filename"></p>
     <button>Submit application</button></form>
     <script>
@@ -42,7 +60,10 @@ function form(p) {
         e.preventDefault();
         const response = await fetch(location.href, {method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({name:document.querySelector('#name').value, answer:document.querySelector('#question')?.value,
-            resume:document.querySelector('#resume').files[0]?.name})});
+            resume:document.querySelector('#resume').files[0]?.name,
+            ...(document.querySelector('#data') ? {choices:{
+              privacy:document.querySelector('#privacy').value,ethnicity:document.querySelector('#ethnicity').value,
+              data:document.querySelector('#data').checked}} : {})})});
         if (response.ok) document.body.innerHTML = '<h1>Thank you for applying</h1><p>Your application has been received.</p>';
       };
     </script>`;
@@ -58,7 +79,7 @@ export function installFixture(home) {
       throw Error('Unexpected fixture API request');
     }
     const ids = JSON.parse(await readFile(path.join(home, 'fixture-available.json'), 'utf8'));
-    const rows = postings.filter(p => ids.includes(p.id) && p.board === match[1]).map(apiRow);
+    const rows = fixturePostings.filter(p => ids.includes(p.id) && p.board === match[1]).map(apiRow);
     if (!match[2]) return Response.json({jobs:rows, meta:{total:rows.length}});
     const row = rows.find(j => String(j.id) === match[2]);
     return row ? Response.json(row) : new Response(null, {status:404});
@@ -74,7 +95,7 @@ export function installFixture(home) {
     context.setDefaultTimeout(6000);
     await context.route('**/*', async route => {
       const request = route.request();
-      const posting = postings.find(p => p.url === request.url());
+      const posting = fixturePostings.find(p => p.url === request.url());
       if (!posting || !['GET','POST'].includes(request.method())) {
         await log({kind:'blocked-network', url:request.url()});
         return route.abort('blockedbyclient');

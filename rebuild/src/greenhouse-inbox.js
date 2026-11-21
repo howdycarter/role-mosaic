@@ -4,6 +4,7 @@ import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { digest } from './applications.js';
+import {cleanField, permissionProposal} from './posting-permission.js';
 
 const filename = 'greenhouse-inbox.json';
 const emptyState = () => ({ version: 1, observations: [], grants: [] });
@@ -15,7 +16,7 @@ const scopes = ['posting', 'employer', 'future'];
 // question. A question's wording, choices, control type and help must match.
 const portable = /^(?:(?:what is your |your )?(?:notice period|preferred name)|when (?:can|could) you start|when are you (?:available|free) to start|(?:which|what) languages (?:do you speak fluently|are you fluent in)|portfolio (?:url|website|link)|(?:your )?linkedin (?:profile|url|profile url))\??$/i;
 const employerHistory = /^(?:have you (?:ever |previously )?(?:worked (?:for|at)|been employed (?:by|at)) .+?|are you (?:currently )?employed (?:by|at) .+?)\??$/i;
-const manual = /\b(?:captcha|recaptcha|password|passphrase|passcode|otp|token|pin code|verification code|security code|authentication code|social security|ssn|tax identification|national id|passport|driver.s licen[cs]e number|bank account|routing number|credit card|debit card|signature|sign electronically|attest|attestation|consent|certify|arbitration|agree|agreement|terms of (?:use|service)|authorization to|background check|criminal|disability|disabled|veteran|racial|race|ethnic|hispanic|gender|transgender|sexual orientation|religion|medical history|human verification|human check|verification challenge|not a robot|api key|secret key|security question|recovery code|backup code|cryptographic key)\b|type (?:your|my) (?:full |legal )?name|one[- ]time (?:code|password)|verify (?:that )?you are human/i;
+const manual = /\b(?:captcha|recaptcha|password|passphrase|passcode|otp|token|pin code|verification code|security code|authentication code|social security|ssn|tax identification|national id|passport|driver.s licen[cs]e number|bank account|routing number|credit card|debit card|signature|sign electronically|attest|attestation|consent|certify|arbitration|agree|agreement|terms of (?:use|service)|authorization to|background check|criminal|disability|disabled|veteran|racial|race|ethnic(?:ity|ities)?|(?:candidate|applicant) privacy (?:notice|policy)|hispanic|gender|transgender|sexual orientation|religion|medical history|human verification|human check|verification challenge|not a robot|api key|secret key|security question|recovery code|backup code|cryptographic key)\b|type (?:your|my) (?:full |legal )?name|one[- ]time (?:code|password)|verify (?:that )?you are human/i;
 const normalize = value => String(value ?? '').replace(/\s+/g, ' ').trim();
 
 export function greenhousePosting(raw) {
@@ -65,7 +66,7 @@ function question(field, form, posting) {
 
 function formStamp(job, form) {
   return digest([job.title, form.fields.map(f => [f.id || '', f.type, normalize(f.label), normalize(f.description || f.helpText),
-    !!f.required, Array.isArray(f.options) ? f.options : []])]);
+    !!f.required, Array.isArray(f.options) ? f.options : [], ...(f.policyLinks?.length ? [f.policyLinks] : [])])]);
 }
 
 function validValue(q, value) {
@@ -153,17 +154,60 @@ export function greenhouseAnswerFor(state, { job, field, form, profileSha256 }) 
   return grantFor(state, { ...posting, profileSha256, stamp: formStamp(job, form) }, q)?.answer;
 }
 
+// A decision is usable only on the same employer, posting, form revision and profile.
+export function approvedPostingPermission(state,{job,form,profileSha256}) {
+  const posting = greenhousePosting(job.url);
+  if (!posting || posting.confirmation || !state.permissions?.length) return null;
+  const stamp = formStamp(job,form);
+  return state.permissions.find(p=>p.jobId===job.id && p.postingKey===posting.key && p.stamp===stamp &&
+    p.profileSha256===profileSha256 && p.decision==='allow') || null;
+}
+
+async function proposedPermission(store,job,form,missing,posting) {
+  if (!form || posting.postingOnly || !missing.length) return null;
+  const profile=await store.read('application-profile.json',null);
+  if(!profile?.answers?.some(a=>a.verified && a.scopePostingKey && missing.some(label=>cleanField(label)===cleanField(a.question))))return null;
+  const ledger=await store.read('application-ledger.json',[]);
+  const priorPostings=new Set(ledger.flatMap(row=>{
+    const previous=greenhousePosting(row.url);
+    return previous?.board===posting.board && previous.id!==posting.id ? ['greenhouse:'+previous.id] : [];
+  }));
+  return permissionProposal({job,form,missing,profile,posting,priorPostings});
+}
+
+export async function decidePostingPermission({store,id,jobId,revision,decision}) {
+  if(!['allow','skip'].includes(decision))throw Error('Choose whether to authorize these answers for this posting.');
+  return withInboxLock(store,async()=>{
+    const state=await readGreenhouseAnswers(store), profileSha256=await activeProfileHash(store);
+    const live=await liveObservations(store,state,profileSha256);
+    const o=live.find(o=>o.channel==='worker' && o.jobId===jobId && o.stamp===revision && o.proposal?.id===id);
+    if(!o)throw Error('This form or permission request changed. Refresh your inbox.');
+    state.permissions??=[];
+    const prior=state.permissions.find(p=>p.requestId===id && p.stamp===revision);
+    if(prior && prior.decision!==decision)throw Error('This permission has already been answered.');
+    if(!prior) {
+      state.permissions.push({id:randomUUID(),requestId:id,decision,postingKey:o.key,jobId,stamp:revision,profileSha256,
+        fields:o.proposal.fields,company:o.company,title:o.title,confirmedAt:new Date().toISOString()});
+      await store.write(filename,state);
+    }
+    return {jobIds:decision==='allow' && !o.otherBlockers && o.questions.every(q=>grantFor(state,o,q))?[jobId]:[]};
+  });
+}
+
 export async function observeGreenhouseQuestions({ store, job, form, missing, profileSha256, channel = 'worker' }) {
   const posting = applicationPosting(job?.url);
   if (!posting || !job.id || !Array.isArray(missing) || !['worker', 'manual'].includes(channel)) return;
   const labels = new Set(missing);
-  const questions = (form?.fields || []).filter(field => labels.has(field.label))
+  const proposal = channel==='worker' ? await proposedPermission(store,job,form,missing,posting) : null;
+  const proposedLabels=new Set(proposal?.fields.map(f=>f.label));
+  const questions = (form?.fields || []).filter(field => labels.has(field.label) && !proposedLabels.has(cleanField(field.label)))
     .map(field => question(field, form, posting)).filter(Boolean);
   // An unsupported control is never answered by inventing a value. It can
   // still independently hold a posting after the answerable items are saved.
-  const observation = questions.length ? {
+  const covered = new Set([...questions,...(proposal?.fields||[])].map(q=>q.label));
+  const observation = questions.length || proposal ? {
     ...posting, jobId: job.id, company: job.company, title: job.title, channel, profileSha256,
-    stamp: formStamp(job, form), questions, otherBlockers: [...labels].some(label => !questions.some(q => q.label === normalize(label).replace(/\s*\*+$/, '').trim())),
+    stamp: formStamp(job, form), questions, ...(proposal?{proposal}:{}), otherBlockers: [...labels].some(label => !covered.has(cleanField(label))),
   } : null;
   await withInboxLock(store, async () => {
     if (await activeProfileHash(store) !== profileSha256) return;
@@ -198,7 +242,9 @@ async function liveObservations(store, state, profileSha256) {
     else if (attempt.postingKey) legacyKeys.add(attempt.postingKey);
   }
   const knownJobs = jobs && new Map(jobs.map(job => [job.id, job]));
+  const skipped=new Set((state.permissions||[]).filter(p=>p.decision==='skip').map(p=>p.postingKey));
   return state.observations.filter(o => {
+    if(skipped.has(o.key))return false;
     if (o.profileSha256 !== profileSha256 || startedIds.has(o.jobId) || startedKeys.has(o.key) ||
         legacyKeys.has(o.postingOnly ? new URL(o.url).hostname + ':' + o.id : 'greenhouse:' + o.id)) return false;
     if (!knownJobs) return true;
@@ -221,9 +267,13 @@ function advanceRevision(state, profileSha256, questionKey) {
 }
 
 function summarize(state, observations) {
-  const groups = new Map(), waiting = new Set(), ready = new Set();
+  const groups = new Map(), waiting = new Set(), ready = new Set(), permissions=[];
   for (const o of observations) {
-    let hasMissing = false;
+    const decision=o.proposal && state.permissions?.find(p=>p.requestId===o.proposal.id && p.stamp===o.stamp);
+    if(decision?.decision==='skip')continue;
+    let hasMissing = Boolean(o.proposal && !decision);
+    if(hasMissing)permissions.push({id:o.proposal.id,jobId:o.jobId,company:o.company,title:o.title,url:o.url,revision:o.stamp,
+      fields:o.proposal.fields.map(({label,answer,help,links})=>({label,answer,help,links}))});
     for (const q of o.questions) {
       if (grantFor(state, o, q)) continue;
       hasMissing = true;
@@ -238,7 +288,7 @@ function summarize(state, observations) {
     if (hasMissing) waiting.add(o.jobId);
     else if (!o.otherBlockers) ready.add(o.jobId);
   }
-  return { items: [...groups.values()], waitingJobIds: [...waiting], readyJobIds: [...ready] };
+  return { items: [...groups.values()], ...(permissions.length?{permissions}:{}), waitingJobIds: [...waiting], readyJobIds: [...ready] };
 }
 
 export async function readGreenhouseInbox(store, { includeObserved = false } = {}) {
@@ -250,7 +300,7 @@ export async function readGreenhouseInbox(store, { includeObserved = false } = {
   const observations = await liveObservations(store, state, profileSha256);
   const result = { ...summarize(state, observations), savedAnswers };
   if (includeObserved) result.observed = new Map(observations.filter(o => o.channel === 'worker')
-    .map(o => [o.jobId, new Set(o.questions.map(q => q.label))]));
+    .map(o => [o.jobId, new Set([...o.questions,...(o.proposal?.fields||[])].map(q => q.label))]));
   return result;
 }
 
@@ -290,6 +340,7 @@ export async function answerGreenhouseQuestion({ store, id, jobId, scope, answer
       await store.write(filename, state);
     }
     const applicable = observations.filter(other => other.channel === 'worker' && !other.otherBlockers &&
+      ( !other.proposal || state.permissions?.some(p=>p.requestId===other.proposal.id && p.stamp===other.stamp && p.decision==='allow')) &&
       other.questions.every(item => grantFor(state, other, item)) && other.questions.some(item =>
         item.key === q.key && target(scope, other) === binding));
     return { jobIds: [...new Set(applicable.map(other => other.jobId))] };

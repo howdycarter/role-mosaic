@@ -1,4 +1,5 @@
 // Read-only view. Actions use the same packet, receipt and application workflows as the dashboard.
+import { openEvidenceQuestions } from './evidence-answers.js';
 import { postingKey } from './applications.js';
 import { createHistoryLookup, historyMatch, reapplicationHistory } from './core.js';
 import { greenhousePosting, readGreenhouseInbox } from './greenhouse-inbox.js';
@@ -31,9 +32,9 @@ export async function readDecisionInbox(store) {
       title:a.title, reason:a.reason || (a.status === 'held' ? 'Draft requires review' : 'Employer confirmation is pending') });
   }
   if (!plan.held?.length) return { ...inbox, reviews };
-  const [jobs, history, exceptions, quality] = await Promise.all([
+  const [jobs, history, exceptions, quality, replies] = await Promise.all([
     snapshot.read('jobs.json', []), snapshot.read('history.json', []), snapshot.read('reapplication-reviews.json', []),
-    snapshot.read('quality-packets.json', {packets:[]}),
+    snapshot.read('quality-packets.json', {packets:[]}), snapshot.read('evidence-replies.json',[]),
   ]);
   const inventory = new Map((jobs || []).map(j => [j.id,j]));
   const attemptedIds = new Set(ledger.filter(a => a.status !== 'preflight_hold').map(a => a.jobId));
@@ -42,6 +43,7 @@ export async function readDecisionInbox(store) {
   const reviewedPostings = new Set(exceptions.map(e => key(e.posting)).filter(Boolean));
   const packets = new Map((quality.packets || []).map(p => [p.job.id, p.id]));
   for (const hold of plan.held) {
+    if (hold.needsApplicantInput === false || ['Posting or form could not be inspected','Closed, sign-in required, or title mismatch'].includes(hold.reason)) continue;
     const job = inventory.get(hold.id);
     if (!job || !['new', 'saved'].includes(job.status || 'new') || job.listingState === 'unlisted') continue;
     const posting = key(job.url);
@@ -57,7 +59,11 @@ export async function readDecisionInbox(store) {
     } else if (hold.reason === 'Application quality review required') kind = 'evidence';
     else if (hold.reason === 'Individual-contributor specialization requires review') kind = 'evidence';
     else if (!/review|verification|sign-in|could not be inspected/i.test(hold.reason)) continue;
-    reviews.push({kind,jobId:job.id,company:job.company,title:job.title,url:job.url,reason:hold.reason,
+    if (hold.evidenceQuestionScope) {
+      questions = openEvidenceQuestions(questions,replies,hold.evidenceQuestionScope);
+      if (!questions.length) continue;
+    }
+    reviews.push({kind,...(hold.evidenceQuestionScope ? {focusedEvidence:true} : {}),jobId:job.id,company:job.company,title:job.title,url:job.url,reason:hold.reason,
       questions,packetId:kind === 'evidence' ? packets.get(job.id) : undefined});
   }
   return { ...inbox, reviews };

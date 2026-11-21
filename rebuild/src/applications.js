@@ -1,11 +1,14 @@
+import {cleanField} from './posting-permission.js';
 import { readFile, mkdir, open, rename, writeFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { evaluate, canonical, historyMatch, reapplicationHistory } from './core.js';
-import { optionForAnswer, sameAnswer } from './application-values.js';
-import {inspectQuality,qualityDigest,jobDigest,selectTrackResume,tracks} from './quality.js';
+import { employerBoardSourceAnswer, optionForAnswer, sameAnswer } from './application-values.js';
+import {loadEvidence,roleTrack,qualityDigest,jobDigest,selectTrackResume,tracks} from './quality.js';
+import {evidenceQuestionScope,openEvidenceQuestions} from './evidence-answers.js';
+import {reviewWithEvidence} from './evidence-review.js';
 import {mixedCompensation} from './sources.js';
-import {greenhousePosting, applicationPosting, greenhouseAnswerFor, observeGreenhouseQuestions, readGreenhouseAnswers} from './greenhouse-inbox.js';
+import {greenhousePosting, applicationPosting, approvedPostingPermission, greenhouseAnswerFor, observeGreenhouseQuestions, readGreenhouseAnswers} from './greenhouse-inbox.js';
 export { optionForAnswer, sameAnswer } from './application-values.js';
 
 export const digest = value => createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');
@@ -15,12 +18,21 @@ async function qualityGate(store,ctx,job,packet,adapter){
  if(['applied','dismissed','rejected','interview','offer'].includes(live?.status))return {ok:false,reasons:['Posting is already closed in the applicant workspace']};
  if(job.listingState==='unlisted'||live?.listingState==='unlisted')return {ok:false,reasons:['Posting is no longer listed on the employer board']};
  if(ctx.policy.requireQualityReview===false&&adapter?.transport!=='playwright')return {ok:true};
- const {assessment}=await inspectQuality(store.root,job),qualitySha256=qualityDigest(assessment);
+ const [evidence,resume,reviews]=await Promise.all([loadEvidence(store.root),selectTrackResume(store.root,roleTrack(job.title)),store.read('quality-reviews.json',{})]);
+ const result=reviewWithEvidence(job,evidence,resume,reviews),{assessment}=result,qualitySha256=qualityDigest(assessment);
+ const standingTrack=adapter?.transport==='playwright' && ctx.policy.applicationResumeTrack===assessment.track && standingAuthorizationMatches(ctx.policy,ctx,adapter);
+ const questionScope=evidenceQuestionScope(assessment.jobDigest,ctx.profileSha256);
+ const applicantQuestions=result.applicantQuestions.length ? openEvidenceQuestions(result.applicantQuestions,
+   await store.read('evidence-replies.json',[]),questionScope) : [];
+ const preferenceKnown=standingTrack && result.handsOnPreference && resume.status==='approved' && resume.sha256===ctx.resumeSha256;
  const reasons=[...assessment.reasons];if(assessment.resume.sha256!==ctx.resumeSha256)reasons.push('Active approved PDF does not match the reviewed résumé for this track');
  if(ctx.policy.applicationResumeTrack && assessment.track!==ctx.policy.applicationResumeTrack)reasons.push('The standing authorization covers a different résumé track');
  if(live&&jobDigest(live)!==jobDigest(job))reasons.push('Posting changed since packet preparation');
  if(packet&&packet.qualitySha256!==qualitySha256)reasons.push('Evidence, résumé or role review changed since preparation');
- return {ok:assessment.ready&&reasons.length===0,reasons,qualitySha256};
+ const contributorReviewed=meetsContributorRule(job,ctx.policy) || (preferenceKnown && assessment.ready);
+ if(packet && !contributorReviewed)reasons.push('Individual-contributor specialization requires review');
+ return {ok:assessment.ready&&reasons.length===0,reasons,qualitySha256,standingTrack,contributorReviewed,preferenceKnown,
+  questionScope,applicantQuestions,contradicted:result.contradicted};
 }
 export function individualContributorReviewed(job,policy,at=new Date()) {
  const grant=policy.standingAuthorization;
@@ -83,7 +95,14 @@ function inspectionSalary(inspection,state){
 export function formDigest(form) {
  return digest({fields:form.fields.map(({label,type,required})=>({label,type,required})),resume:form.resume?.label,submit:form.submit?.label});
 }
-export function answerFor(field,profile) {
+function discoveryAnswerFor(field,job) {
+ if(!job)return undefined;
+ const posting=greenhousePosting(job.url);
+ if(posting && !posting.confirmation && job.source===`greenhouse/${posting.board}` && String(job.sourceId)===posting.id){
+  return employerBoardSourceAnswer(field,job.company);
+ }
+}
+export function answerFor(field,profile,job) {
  const label=questionLabel(field.label),key=label.toLowerCase(),f=profile.facts;
  const eligible=(profile.answers||[]).filter(a=>questionLabel(a.question)===label&&a.verified===true&&(!a.scopePostingKey||a.scopePostingKey===profile.scopePostingKey));
  const exact=eligible.find(a=>a.scopePostingKey)||eligible[0];
@@ -126,24 +145,26 @@ export function answerFor(field,profile) {
   if(f.authorizedUS&&f.requiresSponsorshipUS===false&&field.options?.includes(combined))return combined;
   return f.authorizedUS?'Yes':'No';
  }
- return undefined;
+ return discoveryAnswerFor(field,job);
 }
-export function fillPlan(form,profile,{postingKey:scope,company,inboxAnswer}={}) {
+export function fillPlan(form,profile,{postingKey:scope,company,inboxAnswer,job,permission}={}) {
  if(scope||company)profile={...profile,scopePostingKey:scope,applyingCompany:company};
  const actions=[],missing=[],inboxValues=[];
  for(const field of form.fields){
   if(field.type==='file')continue;
   if(field.type==='select'&&/^(?:location(?: \(city\))?|current location|what location do you intend to work from\?)\*?$/i.test(field.label.trim()))field.locationKnown={city:profile.facts.city,state:profile.facts.state,stateCode:profile.facts.stateCode,country:profile.facts.country};
-  let value=answerFor(field,profile);
+  const authorized=permission?.fields.find(f=>f.id===field.id && f.type===field.type && f.label===cleanField(field.label));
+  let value=authorized?.answer ?? answerFor(field,profile);
   if(field.required && (value===undefined || value===null || value==='') && inboxAnswer) {
    value=inboxAnswer(field);
    if(value!==undefined && value!==null && value!=='') {
     inboxValues.push({label:field.label,type:field.type,options:field.options||[],country:field.countryContext||'',value});
    }
   }
+  if(value===undefined)value=discoveryAnswerFor(field,job);
   if(value===undefined||value===null||value===''){if(field.required)missing.push(field.label);continue;}
   if(field.type==='number'&&!Number.isFinite(Number(value))){missing.push('Numeric answer required: '+field.label);continue;}
-  const consent=(profile.answers||[]).find(a=>questionLabel(a.question)===questionLabel(field.label)&&a.verified&&['privacy-consent','application-attestation'].includes(a.kind)&&(!a.scopePostingKey||a.scopePostingKey===profile.scopePostingKey));
+  const consent=authorized?.kind==='privacy-consent'||(profile.answers||[]).find(a=>questionLabel(a.question)===questionLabel(field.label)&&a.verified&&['privacy-consent','application-attestation'].includes(a.kind)&&(!a.scopePostingKey||a.scopePostingKey===profile.scopePostingKey));
   const personalAgreement=/\b(?:I|you)\s+(?:(?:do|will|must|hereby)\s+)?agree\b|\b(?:do|will|would)\s+you\s+agree\b/i.test(field.label);
   if(['password','hidden'].includes(field.type)||(/password|signature|typing my name|type your name|consent|certif(?:y|ication)/i.test(field.label)||personalAgreement)&&!consent){missing.push(`Manual action: ${field.label}`);continue;}
   if(field.type!=='checkbox'&&field.value&&!sameAnswer(field,field.value,value)){missing.push(`Existing value differs: ${field.label}`);continue;}
@@ -178,7 +199,9 @@ async function prerequisites(store,now,updatedPolicy) {
  const profileSha256=digest(profile),searchSha256=digest(search);
  if(profileSha256!==policy.verifiedProfileSha256)throw Error('Application profile changed since verification');
  if(!profile.facts?.email||!profile.facts?.fullName)throw Error('Verified name and application email are required');
- return {policy,search,connections:{...connections,resume:resumePath},profile,history,reapplicationReviews:await store.read('reapplication-reviews.json',[]),resumeSha256,profileSha256,searchSha256};
+ const inbox=await readGreenhouseAnswers(store);
+ const skippedPostings=new Set((inbox.permissions||[]).filter(p=>p.decision==='skip').map(p=>p.postingKey));
+ return {policy,search,connections:{...connections,resume:resumePath},profile,history,skippedPostings,reapplicationReviews:await store.read('reapplication-reviews.json',[]),resumeSha256,profileSha256,searchSha256};
 }
 function duplicate(job,history,attempts,reviews=[]) {
  history=reapplicationHistory(job,history,reviews);
@@ -277,11 +300,17 @@ export async function configureStandingAuthorization({home,evidence,enabled=true
 }
 async function applicationFillPlan(store, job, form, ctx, adapter) {
  const scope = {postingKey:postingKey(job.url),company:job.company};
+ let permission;
  if(adapter.transport==='playwright' && applicationPosting(job.url)){
+  scope.job=job;
   const state=await readGreenhouseAnswers(store);
+  permission=approvedPostingPermission(state,{job,form,profileSha256:ctx.profileSha256});
   scope.inboxAnswer=field=>greenhouseAnswerFor(state,{job,field,form,profileSha256:ctx.profileSha256});
  }
- return fillPlan(form,ctx.profile,scope);
+ if(!permission)return fillPlan(form,ctx.profile,scope);
+ const result=fillPlan(form,ctx.profile,{...scope,permission});
+ result.inboxAnswerSha256=digest([result.inboxAnswerSha256||null,permission.requestId,permission.stamp]);
+ return result;
 }
 async function packetFromInspection(store,job,inspection,ctx,at,adapter) {
  const plan=await applicationFillPlan(store,job,inspection.form,ctx,adapter),salary=inspectionSalary(inspection,ctx.profile.facts.stateCode);
@@ -300,20 +329,23 @@ export async function prepareApplications({home,adapter,limit=15,jobIds,restartA
   if(jobIds&&!jobIds.includes(job.id))continue;
   if(packets.length>=Math.min(limit,ctx.policy.maxPerDay))break;
   inspectedIds.add(job.id);
+  if(ctx.skippedPostings.has(greenhousePosting(job.url)?.key))continue;
   const restart=await restartException(store,restartAuthorizationId,job,ctx,attempts,adapter,now());
   if(restartAuthorizationId&&!restart)continue;
   if(!supportedPosting(job.url)||!restart&&duplicate(job,ctx.history,attempts,ctx.reapplicationReviews)||['applied','dismissed','rejected'].includes(job.status))continue;
-  const contributorReviewed=meetsContributorRule(job,ctx.policy,now());
   const quality=await qualityGate(store,ctx,job,undefined,adapter);
+  const contributorReviewed=quality.contributorReviewed || meetsContributorRule(job,ctx.policy,now());
   if(!quality.ok){
-   const questions=contributorReviewed?quality.reasons:[...quality.reasons,'Individual-contributor specialization requires review'];
-   clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,reason:'Application quality review required',questions});continue;
+   const reasons=contributorReviewed||quality.preferenceKnown?quality.reasons:[...quality.reasons,'Individual-contributor specialization requires review'];
+   const questions=quality.applicantQuestions?.length?quality.applicantQuestions:reasons;
+   const applicantScope=quality.standingTrack ? {needsApplicantInput:!quality.contradicted && !!quality.applicantQuestions.length,evidenceQuestionScope:quality.questionScope} : {};
+   clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,reason:'Application quality review required',questions,...applicantScope});continue;
   }
   const preliminary=evaluate({...job,compensation:job.compensation||{min:ctx.search.minAnnualBaseUsd,currency:'USD',interval:'year'}},ctx.search);
   if(preliminary.reasons.some(r=>!['Annual USD base compensation needs verification','Location needs review'].includes(r)))continue;
   if(!contributorReviewed){clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,reason:'Individual-contributor specialization requires review'});continue;}
-  let inspection;try{inspection=await adapter.inspect(job);}catch{held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Posting or form could not be inspected'});continue;}
-  if(!inspection.titleVerified||inspection.closed||inspection.login){clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Closed, sign-in required, or title mismatch'});continue;}
+  let inspection;try{inspection=await adapter.inspect(job);}catch{held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:'Posting or form could not be inspected',needsApplicantInput:false});continue;}
+  if(!inspection.titleVerified||inspection.closed||inspection.login){clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:inspection.closed?'Employer closed the posting':inspection.login?'Employer sign-in required':'Employer title differs from the posting',needsApplicantInput:!inspection.closed && !!inspection.login});continue;}
   const pay=inspectionSalary(inspection,ctx.profile.facts.stateCode);
   const fit=evaluate({...job,location:inspection.location,compensation:pay},ctx.search);
   if(fit.disposition!=='match'){clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,reason:fit.reasons.join('; ')});continue;}
@@ -389,6 +421,7 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
    if(!Number.isFinite(cost)||cost<0||today.reduce((n,a)=>n+(a.reservedCostUsd||0),0)+cost>ctx.policy.dailyBudgetUsd){results.push({status:'budget_limit'});break;}
    const authorization=applicationAuthorization(ctx.policy,packet,adapter,approvals,at);
    if(!authorization){results.push({jobId:packet.job.id,status:'authorization_required'});continue;}
+   if(ctx.skippedPostings.has(greenhousePosting(packet.job.url)?.key)){results.push({jobId:packet.job.id,status:'applicant_skipped'});continue;}
    const quality=await qualityGate(store,ctx,packet.job,packet,adapter);if(!quality.ok){results.push({jobId:packet.job.id,status:'quality_held',reasons:quality.reasons});continue;}
    if(resumed?.browserEvidence)adapter.restoreEvidence?.(packet.job.id,resumed.browserEvidence);
    let inspection;
@@ -424,7 +457,7 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
     if(!check.ok||check.captcha||check.manual){attempt.status='held';attempt.reason=check.reason||'Readback, CAPTCHA or manual action required';await save();results.push({...attempt});continue;}
     if(!await shouldContinue()){attempt.status='held';attempt.reason='Worker paused before submission';await save();results.push({...attempt});continue;}
     const current=await prerequisites(store,now());
-    if(submissionHold(current.policy,adapter)||!(await qualityGate(store,current,packet.job,packet,adapter)).ok)throw Error('Submission mode or quality evidence changed');
+    if(current.skippedPostings.has(greenhousePosting(packet.job.url)?.key)||submissionHold(current.policy,adapter)||!(await qualityGate(store,current,packet.job,packet,adapter)).ok)throw Error('Submission mode or quality evidence changed');
     const currentAttempts=await store.read('application-ledger.json',[]),currentRestart=await restartException(store,packet.restartAuthorizationId,packet.job,current,currentAttempts,adapter,now(),attempt.id);
     if(current.resumeSha256!==packet.resumeSha256||current.profileSha256!==packet.profileSha256||current.searchSha256!==packet.searchSha256||!applicationAuthorization(current.policy,packet,adapter,await store.read('application-approvals.json',[]),now())||packet.restartAuthorizationId&&!currentRestart||!currentRestart&&duplicate(packet.job,current.history,currentAttempts.filter(a=>a.id!==attempt.id),current.reapplicationReviews))throw Error('Submission authorization or applicant state changed');
     if(packet.inboxAnswerSha256){

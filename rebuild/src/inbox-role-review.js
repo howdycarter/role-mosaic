@@ -1,14 +1,16 @@
 import { digest, meetsContributorRule, postingKey, standingAuthorizationMatches } from './applications.js';
+import { evidenceQuestionScope, openEvidenceQuestions } from './evidence-answers.js';
+import { mandatoryClauses, reviewWithEvidence } from './evidence-review.js';
 import { htmlText } from './career.js';
 import { makeRoleReview } from './packets.js';
-import { assessQuality, jobDigest, loadEvidence, roleTrack, selectTrackResume } from './quality.js';
+import { jobDigest, loadEvidence, roleTrack, selectTrackResume } from './quality.js';
 
 const clean = s => String(s ?? '').replace(/\s+/g, ' ').trim();
 
 async function reviewContext(store, jobId) {
-  const [plan, jobs, ledger, reviews, policy, profile, search] = await Promise.all([
+  const [plan, jobs, ledger, reviews, policy, profile, search, replies] = await Promise.all([
     store.read('application-plan.json', {held:[]}), store.read('jobs.json', []), store.read('application-ledger.json', []),
-    store.read('quality-reviews.json', {}), store.read('application-policy.json', {}), store.read('application-profile.json', {}), store.read('search.json', {}),
+    store.read('quality-reviews.json', {}), store.read('application-policy.json', {}), store.read('application-profile.json', {}), store.read('search.json', {}), store.read('evidence-replies.json', []),
   ]);
   const job = jobs.find(j => j.id === jobId);
   const hold = plan.held?.find(h => h.id === jobId && /quality review required|specialization requires review/i.test(h.reason));
@@ -17,28 +19,50 @@ async function reviewContext(store, jobId) {
   const track = roleTrack(job.title);
   const [evidence, resume] = await Promise.all([loadEvidence(store.root), selectTrackResume(store.root, track)]);
   const previous = reviews[jobId];
-  const assessment = assessQuality(job,evidence,{resume,review:previous});
+  const derived = reviewWithEvidence(job,evidence,resume,reviews), {assessment} = derived;
   const description = htmlText(htmlText(job.description || ''));
   const scope = {resumeSha256:resume.sha256, searchSha256:digest(search), profileSha256:digest(profile)};
   const canReviewIC = policy.enabled && policy.submissionMode === 'automatic' && policy.automationRiskAcknowledged === true &&
     resume.status === 'approved' && policy.verifiedProfileSha256 === scope.profileSha256 &&
     standingAuthorizationMatches(policy,scope,{transport:'playwright'});
   const priorIC = (policy.individualContributorReviews || []).filter(r => r.jobId === jobId);
-  const revision = digest([assessment.jobDigest,assessment.evidenceDigest,resume.status,scope,previous||null,
+  const questionScope = evidenceQuestionScope(assessment.jobDigest,scope.profileSha256);
+  const applicantQuestions = openEvidenceQuestions(derived.applicantQuestions,replies,questionScope);
+  const revision = digest([applicantQuestions,assessment.reviewDigest,assessment.jobDigest,assessment.evidenceDigest,resume.status,scope,previous||null,
     policy.standingAuthorization||null,policy.requireICReview !== false,priorIC,!!canReviewIC]);
   const priorCurrent = previous && previous.jobDigest === jobDigest(job) && previous.evidenceDigest === evidence.digest &&
     previous.resumeSha256 === resume.sha256;
-  const view = {jobId,revision,description,company:job.company,title:job.title,url:job.url,track,
+  const view = {jobId,revision,applicantQuestions,description,company:job.company,title:job.title,url:job.url,track,
     resume:{status:resume.status, filename:resume.filename}, reasons:assessment.reasons,
     facts:evidence.facts.filter(f => f.tracks.includes(track)).map(({id,text,sourceId}) => ({id,text,sourceId})),
-    requirements:priorCurrent ? previous.requirements : assessment.requirements.map(r => ({text:r.text,status:'unknown',evidenceIds:[]})),
-    needsIC:!meetsContributorRule(job,policy), canReviewIC:!!canReviewIC};
-  return {view,assessment,job,evidence,resume,policy,reviews,scope};
+    requirements:derived.requirements || (priorCurrent ? previous.requirements : assessment.requirements.map(r => ({text:r.text,status:'unknown',evidenceIds:[]}))),
+    needsIC:!meetsContributorRule(job,policy) && !(derived.handsOnPreference && policy.applicationResumeTrack===track && canReviewIC), canReviewIC:!!canReviewIC};
+  return {view,assessment,job,evidence,resume,policy,reviews,scope,replies,questionScope};
 }
 
 export async function inboxRoleReview(store, jobId) {
   return (await reviewContext(store, jobId)).view;
 }
+export async function saveEvidenceReplies(store, data) {
+  return store.lock(async () => {
+    const {view,assessment,replies,questionScope} = await reviewContext(store,data.jobId);
+    if (data.revision !== view.revision) throw Error('The questions or evidence changed. Reopen this item.');
+    if (!Array.isArray(data.answers) || !data.answers.length || data.answers.length > 100)
+      throw Error('Enter at least one answer.');
+    const receivedAt = new Date().toISOString(), known = new Set(view.applicantQuestions);
+    const added = data.answers.map(({question,answer}) => {
+      if (!known.delete(question) || typeof answer !== 'string' || !answer.trim() || answer.length > 5000)
+        throw Error('Answer a question shown for this posting.');
+      const requirements = view.requirements.filter(row => row.status === 'unknown' && row.questions?.includes(question));
+      return {scope:questionScope, jobId:view.jobId, postingDigest:assessment.jobDigest, reviewRevision:view.revision,
+        evidenceDigest:assessment.evidenceDigest, question, answer:answer.trim(), requirements:requirements.map(row=>row.text),
+        receivedAt, source:'Applicant response in the local Mosaic inbox', status:'awaiting-source-review'};
+    });
+    await store.write('evidence-replies.json',[...replies,...added]);
+    return {saved:added.length,output:'Answer saved for source review. Mosaic will keep this application on hold until the evidence supports the qualification.'};
+  });
+}
+
 export async function saveInboxRoleReview(store, data) {
   return store.lock(async () => {
     const {view,assessment,job,evidence,resume,policy,reviews,scope} = await reviewContext(store,data.jobId);
@@ -54,10 +78,11 @@ export async function saveInboxRoleReview(store, data) {
           (r.status === 'supported' && !r.evidenceIds.length)) throw Error('Quote each requirement from the posting and link verified facts to each supported claim.');
       return {text:clean(r.text),status:r.status,evidenceIds:[...new Set(r.evidenceIds)]};
     });
-    if (assessment.requirements.some(required => !requirements.some(r => clean(r.text).includes(clean(required.text)))))
+    const mandatory = [...mandatoryClauses(job.description),...assessment.requirements.map(row=>row.text)];
+    if (mandatory.some(text => !requirements.some(row => clean(row.text)===clean(text))))
       throw Error('Include each identified mandatory requirement in the review.');
     const review = makeRoleReview(job,evidence,resume,data.reviewer,requirements);
-    const assessed = assessQuality(job,evidence,{resume,review});
+    const {assessment:assessed} = reviewWithEvidence(job,evidence,resume,{...reviews,[job.id]:review});
     if (data.approveIC === true && (!view.needsIC || !view.canReviewIC || !assessed.ready ||
         typeof data.icEvidence !== 'string' || !data.icEvidence.trim() || data.icEvidence.length > 3000 ||
         !Array.isArray(data.icFactIds) || !data.icFactIds.length || data.icFactIds.some(id => !facts.has(id))))

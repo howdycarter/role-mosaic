@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { ApplicationStore, digest, postingKey } from '../src/applications.js';
 import { identity } from '../src/core.js';
 import { seedQuality } from './helpers/quality-fixture.js';
-import { postings, content, location, notice, priorEmployment } from './helpers/greenhouse-inbox-fixture.js';
+import { postings, content, location, notice, priorEmployment, consentChoices, consentPostings } from './helpers/greenhouse-inbox-fixture.js';
 
 const rebuild = fileURLToPath(new URL('..', import.meta.url));
 const fixtureModule = new URL('./helpers/greenhouse-inbox-fixture.js', import.meta.url).href;
@@ -83,6 +83,80 @@ async function waitForIdle(base, store, expectedReceipts, previousStart) {
     holds: (await store.read('application-plan.json', {})).held,
   }));
 }
+
+test('authorizing one current consent card applies only to its selected Greenhouse posting in Chrome', testOptions, async t=>{
+  const {chromium}=await import('playwright');
+  const home=await mkdtemp(path.join(os.tmpdir(),'mosaic-permission-browser-')),store=new ApplicationStore(home);
+  t.after(()=>rm(home,{recursive:true,force:true}));
+  await seedWorkspace(home,store);
+  const priorUrl='https://job-boards.greenhouse.io/example-alpha/jobs/100';
+  const profile=await store.read('application-profile.json');
+  profile.answers=consentChoices.map(({id,...choice})=>({
+    question:choice.label,answer:choice.answer,...(choice.kind?{kind:choice.kind}:{}),
+    verified:true,scopePostingKey:postingKey(priorUrl),
+  }));
+  await store.write('application-profile.json',profile);
+  const policy=await store.read('application-policy.json');
+  await store.write('application-policy.json',{...policy,verifiedProfileSha256:digest(profile)});
+  await store.write('application-ledger.json',[{id:'past',jobId:'prior-job',company:'example-alpha',title:'Commercial Engineer',
+    url:priorUrl,postingKey:postingKey(priorUrl),status:'submitted',createdAt:new Date().toISOString()}]);
+  for(const p of consentPostings)await seedQuality(home,makeJob(p),path.join(home,'approved.pdf'));
+  await store.write('fixture-available.json',consentPostings.map(p=>p.id));
+  const server=await startServer(home);
+  let browser;
+  try{
+    browser=await chromium.launch({headless:true,channel:process.env.MOSAIC_TEST_CHANNEL||undefined,chromiumSandbox:true});
+    const dashboard=await browser.newContext({serviceWorkers:'block'});
+    const errors=[],external=[];
+    await dashboard.route('**/*',route=>{
+      if(new URL(route.request().url()).origin===server.base)return route.continue();
+      external.push(route.request().url());return route.abort('blockedbyclient');
+    });
+    const page=await dashboard.newPage();page.setDefaultTimeout(10000);
+    page.on('pageerror',e=>errors.push(e.message));
+    await page.goto(server.base);
+    await page.getByText('Experimental automatic submission',{exact:true}).click();
+    await page.locator('#automaticTrack').selectOption('product');
+    await page.locator('#automationRisk').check();
+    const enabled=page.waitForResponse(r=>r.url().endsWith('/api/automatic-submissions'));
+    await page.locator('#automaticEnable').click();assert.equal((await enabled).status(),200);
+    const run=page.waitForResponse(r=>r.url().endsWith('/api/worker/run'));
+    await page.locator('#workerRun').click();assert.equal((await run).status(),202);
+    await waitForIdle(server.base,store,1);
+    const accessLog=async()=>(await readFile(path.join(home,'fixture-events.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+    const before=await accessLog();
+    assert.deepEqual(before.filter(e=>e.kind==='submit'),[]);
+    await page.reload();
+    const [target,other]=consentPostings;
+    const card=p=>page.getByRole('group',{name:p.board+' · '+p.title,exact:true});
+    await card(other).getByRole('button',{name:'Authorize these answers for this application'}).waitFor();
+    const selected=card(target);
+    for(const choice of consentChoices){
+      await selected.getByText(choice.label,{exact:true}).waitFor();
+      await selected.getByText(choice.id==='data'?'Check the consent box':choice.answer,{exact:true}).waitFor();
+    }
+    assert.equal(await selected.getByRole('link').getAttribute('href'),'https://example.invalid/candidate-policy');
+    const beforeStart=(await store.read('worker-state.json')).startedAt;
+    const decision=page.waitForResponse(r=>r.url().endsWith('/api/inbox/posting-permission'));
+    await selected.getByRole('button',{name:'Authorize these answers for this application'}).click();
+    const response=await decision;assert.ok(response.ok(),await response.text());
+    await waitForIdle(server.base,store,2,beforeStart);
+    const after=await accessLog(),approvedTrack=(await store.read('resume-registry.json')).variants.product;
+    assert.deepEqual(after.filter(e=>e.kind==='submit'),[{kind:'submit',id:target.id,name:'Example Applicant',
+      resume:path.basename(approvedTrack.path),choices:{privacy:'I acknowledge',ethnicity:'I decline to answer',data:true}}]);
+    assert.ok(after.slice(before.length).every(e=>e.id===target.id));
+    const ledger=await store.read('application-ledger.json');
+    const sent=ledger.filter(a=>a.id!=='past');
+    assert.equal(sent.length,1);assert.equal(sent[0].jobId,makeJob(target).id);
+    assert.equal(sent[0].status,'submitted');assert.equal(sent[0].receipt?.confirmed,true);
+    assert.deepEqual(await store.read('application-profile.json'),profile);
+    await page.reload();
+    await card(other).getByRole('button',{name:'Authorize these answers for this application'}).waitFor();
+    assert.equal(await card(target).count(),0);
+    assert.deepEqual(external,[]);assert.deepEqual(errors,[]);
+    assert.ok(!after.some(e=>e.kind==='blocked-network'));
+  } finally {await browser?.close();await server.close();}
+});
 
 test('Greenhouse decisions continue the correct forms through Chrome, scope reuse and service restart', testOptions, async () => {
   const {chromium}=await import('playwright');

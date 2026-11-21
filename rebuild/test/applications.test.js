@@ -126,6 +126,54 @@ test('standing scope changes and revocation during fill stop submission',async()
 test('a native worker prepares and submits in the same cycle under standing rules',async()=>{
  const f=await fixture();try{f.adapter.transport='playwright';await configureStandingAuthorization({home:f.root,evidence:'Explicit automatic search authorization',now});const {MosaicWorker}=await import('../src/worker.js');const w=new MosaicWorker({home:f.root,adapterFactory:async()=>f.adapter});await w.cycle({discover:false});assert.equal((await f.store.read('application-ledger.json'))[0].status,'submitted');assert.deepEqual(await f.store.read('application-approvals.json',[]),[]);assert.deepEqual(f.events,['fill','submit']);}finally{await f.close();}
 });
+test('a Greenhouse discovery answer requires the exact saved board and role and defers to the applicant',()=>{
+ const label='How did you hear about this job?',field={label,type:'textarea',required:true};
+ const job={company:'Example',source:'greenhouse/example',sourceId:'123',url:'https://job-boards.greenhouse.io/example/jobs/123'};
+ const profile={facts:{}},answer="The employer's public Greenhouse job board.";
+ assert.equal(answerFor(field,profile,job),answer);
+ for(const changed of [{source:'import'},{source:'greenhouse/other'},{sourceId:'124'},{url:job.url+'/confirmation'}]){
+  assert.equal(answerFor(field,profile,{...job,...changed}),undefined);
+ }
+ assert.equal(answerFor({...field,label:'How did you first hear about our company?'},profile,job),undefined);
+ assert.equal(answerFor({...field,type:'select',options:['Employee referral','LinkedIn']},profile,job),undefined);
+ assert.equal(answerFor({...field,type:'select',options:['Employee referral','Company careers page']},profile,job),'Company careers page');
+ assert.equal(answerFor(field,{facts:{},answers:[{question:label,answer:'Employee referral',verified:true}]},job),'Employee referral');
+ const form={fields:[field],resume:{label:'Résumé'},submit:{label:'Submit'}};
+ const plan=fillPlan(form,profile,{job,inboxAnswer:()=>'LinkedIn'});
+ assert.equal(plan.actions[0].value,'LinkedIn');
+ assert.ok(plan.inboxAnswerSha256);
+});
+test('a targeted native run fills the recorded discovery source and preserves unrelated authorized packets',async t=>{
+ const f=await fixture();t.after(f.close);
+ f.adapter.transport='playwright';
+ const target={...f.job,source:'greenhouse/example',sourceId:'123'};
+ const other={...target,id:'other-id',company:'Other',source:'greenhouse/other',sourceId:'456',url:'https://job-boards.greenhouse.io/other/jobs/456'};
+ const third={...other,id:'third-id',sourceId:'457',url:'https://job-boards.greenhouse.io/other/jobs/457'};
+ await f.store.write('jobs.json',[other,third,target]);
+ for(const job of [target,other,third])await seedQuality(f.root,job,(await f.store.read('connections.json')).resume);
+ f.form.fields.push({id:'source',label:'How did you hear about this job?',type:'textarea',required:true,value:''});
+ await configureStandingAuthorization({home:f.root,evidence:'Explicit automatic search authorization'});
+ const waiting=await prepareApplications({home:f.root,adapter:f.adapter,jobIds:[other.id]});
+ assert.equal(waiting.packets.length,1);
+ const visited=[],submitted=[],inspect=f.adapter.inspect;
+ f.adapter.inspect=async(job,...args)=>{visited.push(job.id);return inspect(job,...args)};
+ f.adapter.fill=async(inspection,actions)=>{
+  assert.equal(inspection.job.id,target.id);
+  assert.equal(actions.find(a=>a.field.id==='source').value,"The employer's public Greenhouse job board.");
+ };
+ f.adapter.submit=async inspection=>submitted.push(inspection.job.id);
+ const {MosaicWorker}=await import('../src/worker.js');
+ const worker=new MosaicWorker({home:f.root,adapterFactory:async()=>f.adapter,fetcher:async()=>{throw Error('Unexpected network call')}});
+ await worker.cycle({discover:false,jobIds:[]});
+ assert.deepEqual(visited,[]);
+ await worker.cycle({discover:false,jobIds:[target.id]});
+ assert.deepEqual([...new Set(visited)],[target.id]);
+ assert.deepEqual(submitted,[target.id]);
+ const ledger=await f.store.read('application-ledger.json');
+ assert.deepEqual(ledger.map(row=>[row.jobId,row.status]),[[target.id,'submitted']]);
+ const {packets}=await f.store.read('application-plan.json');
+ assert.ok(packets.some(p=>p.digest===waiting.packets[0].digest));
+});
 test('posting-scoped answers do not leak to another employer or job',()=>{const form={fields:[{label:'Why this company?',type:'text',required:true,value:''}],resume:{label:'Resume'},submit:{label:'Submit'}};const p={facts:{},answers:[{question:'Why this company?',answer:'Company-specific narrative',verified:true,scopePostingKey:'job:A'}]};assert.equal(fillPlan(form,p,{postingKey:'job:A'}).actions[0].value,'Company-specific narrative');assert.equal(fillPlan(form,p,{postingKey:'job:B'}).actions.length,0);assert.equal(fillPlan(form,p,{postingKey:'job:B'}).missing.length,1);});
 test('pre-submit holds do not use standing submission quota; uncertain submissions still reserve it',async()=>{
  const f=await fixture();try{f.adapter.transport='playwright';await f.prepare();await configureStandingAuthorization({home:f.root,evidence:'Explicit synthetic applicant authorization',now});
