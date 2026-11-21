@@ -330,3 +330,76 @@ test('Ashby native button and radio answers render as exact choices and survive 
     assert.deepEqual(state.permissions||[],[]);
   }finally{await browser?.close();await server.close();}
 });
+
+test('Caylent displays six unselected, revocable choices only for its verified posting',testOptions,async t=>{
+  const {chromium}=await import('playwright');
+  const {caylentGenderId:id,caylentGenderLabel:label,caylentGenderOptions:options,fillCaylentGender,verifyCaylentGender}=await import('../src/caylent-gender.js');
+  const {readGreenhouseAnswers,observeGreenhouseQuestions,readGreenhouseInbox,greenhouseAnswerFor,answerGreenhouseQuestion}=await import('../src/greenhouse-inbox.js');
+  const {fillPlan}=await import('../src/applications.js');
+  const home=await mkdtemp(path.join(os.tmpdir(),'mosaic-personal-choice-'));t.after(()=>rm(home,{recursive:true,force:true}));
+  const store=new ApplicationStore(home);await seedWorkspace(home,store);
+  const job={id:'synthetic',url:'https://job-boards.greenhouse.io/caylent/jobs/6004669004',
+    title:'Senior Forward Deployed Engineer',source:'greenhouse/caylent',sourceId:'6004669004',company:'Caylent'};
+  await store.write('jobs.json',[job]);await store.write('worker.json',{enabled:false,maxInspections:1});
+  const profile=await store.read('application-profile.json'),hash=digest(profile);
+  const server=await startServer(home);t.after(()=>server.close());
+  const browser=await chromium.launch({headless:true,channel:process.env.MOSAIC_TEST_CHANNEL||undefined,chromiumSandbox:true});
+  t.after(()=>browser.close());const context=await browser.newContext({serviceWorkers:'block'});
+  const outbound=[];
+  await context.route('**/*',route=>{
+    const url=route.request().url();
+    if(new URL(url).origin===server.base)return route.continue();
+    if(url!==job.url||route.request().method()!=='GET'){outbound.push(url);return route.abort();}
+    return route.fulfill({contentType:'text/html',body:'<form id="application-form"><label for="'+id+'">'+label+'*</label>'+
+      '<select id="'+id+'" required><option value="">Select...</option>'+options.map((s,i)=>'<option value="'+i+'">'+s+'</option>').join('')+'</select></form>'});
+  });
+  const employer=await context.newPage();await employer.goto(job.url);
+  const raw={id,label,required:true,type:'select',options:[...options]},published={fields:[raw]};
+  async function inspect(){
+    const field={...raw,value:await employer.locator('#'+id).evaluate(e=>e.value?e.selectedOptions[0].textContent:'')};
+    const form={fields:[field]};await verifyCaylentGender(employer,job,form,published);return {field,form};
+  }
+  const original=await inspect();assert.ok(original.field.caylentGenderVerified);
+  const missing=[label];
+  await observeGreenhouseQuestions({store,job,form:original.form,missing,profileSha256:hash});
+  const initial=(await readGreenhouseInbox(store)).items[0],ask={store,id:initial.id,jobId:job.id,scope:'posting',
+    channel:'worker',revision:initial.postings[0].revision,confirm:true};
+  assert.deepEqual(initial.scopes,['posting']);
+  const otherEmployer={...job,url:job.url.replace('/caylent/','/different/')};
+  const lookup=async(candidate,record=job)=>{
+    const state=await readGreenhouseAnswers(store);return greenhouseAnswerFor(state,{job:record,...candidate,profileSha256:hash});
+  };
+  assert.equal(await lookup(original),undefined);
+  // A prior broad demographic answer or employer-specific permission may not supply this response.
+  const prior={...profile,answers:[{verified:true,question:label,answer:options[1]}]};
+  assert.ok(fillPlan(original.form,prior,{job,permission:{fields:[{...raw,answer:options[1]}]}}).missing.includes(label));
+  await assert.rejects(answerGreenhouseQuestion({...ask,answer:'invalid choice'}));
+  await assert.rejects(answerGreenhouseQuestion({...ask,answer:options[1],scope:'future'}));
+  const dash=await context.newPage();await dash.goto(server.base);
+  const group=dash.getByRole('group',{name:label,exact:true}),choice=group.getByLabel('Your answer');
+  assert.equal(await choice.inputValue(),'');assert.deepEqual(await choice.locator('option').allTextContents(),['Choose an answer',...options]);
+  const consent=group.getByRole('checkbox'),button=group.getByRole('button',{name:'Confirm this answer and continue'});
+  assert.equal(await consent.isChecked(),false);assert.equal(await group.getByRole('link',{name:'Open the employer form'}).getAttribute('href'),job.url);
+  await choice.selectOption({label:options.at(-1)});await button.click();
+  assert.equal(await lookup(original),undefined);
+  await consent.check();const save=dash.waitForResponse(r=>r.url().endsWith('/api/inbox/answer'));
+  await button.click();assert.equal((await save).status(),200);
+  assert.equal(await lookup(original),options.at(-1));assert.equal(await lookup(original,otherEmployer),undefined);
+  await assert.rejects(fillCaylentGender(employer,job,original.field,options.at(-1)),/changed/);
+  const savedAnswer=await lookup(original),plan=fillPlan(original.form,profile,{job,inboxAnswer:()=>savedAnswer});
+  const allowed=plan.actions[0];assert.ok(allowed.field.caylentGenderAuthorized);
+  await fillCaylentGender(employer,job,allowed.field,allowed.value);
+  const readback=await inspect();assert.equal(readback.field.value,options.at(-1));assert.equal(await lookup(readback),options.at(-1));
+  await employer.locator('#'+id).evaluate(e=>e.options[1].textContent='Updated choice');
+  const changed=await inspect();assert.equal(changed.field.caylentGenderVerified,undefined);assert.equal(await lookup(changed),undefined);
+  await assert.rejects(fillCaylentGender(employer,job,allowed.field,allowed.value),/changed/);
+  await dash.getByText('Saved application answers',{exact:true}).click();
+  const revoked=dash.waitForResponse(r=>r.url().endsWith('/api/inbox/forget'));
+  await dash.getByRole('button',{name:/forget/i}).click();assert.equal((await revoked).status(),200);
+  assert.equal(await lookup(original),undefined);
+  await assert.rejects(answerGreenhouseQuestion({...ask,answer:options.at(-1)}));
+  const skip=dash.waitForResponse(r=>r.url().endsWith('/api/inbox/posting-permission'));
+  await group.getByRole('button',{name:'Skip this application'}).click();assert.equal((await skip).status(),200);
+  assert.deepEqual((await readGreenhouseInbox(store)).items,[]);assert.equal((await readGreenhouseAnswers(store)).permissions.at(-1).decision,'skip');
+  assert.deepEqual(outbound,[]);assert.deepEqual(await store.read('application-profile.json'),profile);
+});

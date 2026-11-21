@@ -126,9 +126,10 @@ export class CodexBrowserAdapter {
   if(current.captcha)return {ok:false,captcha:true,reason:'Human CAPTCHA verification required'};
   return {ok:true};
  }
+ finalButton(inspection){return inspection.tab.playwright.getByRole('button',{name:inspection.form.submit.label,exact:true});}
  async submit(inspection){
   await inspection.tab.ax.get('state');
-  await inspection.tab.playwright.getByRole('button',{name:inspection.form.submit.label,exact:true}).click();
+  await this.finalButton(inspection).click();
   await inspection.tab.ax.get('state');
  }
  async confirm(inspection,{waitMs=8000}={}){

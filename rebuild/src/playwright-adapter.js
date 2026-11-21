@@ -1,3 +1,4 @@
+import {verifyCaylentGender,caylentGenderControl,fillCaylentGender} from './caylent-gender.js';
 import {recruiterflowRoute,inspectRecruiterflow,guardRecruiterflow,fillRecruiterflowMonth,confirmRecruiterflow} from './recruiterflow.js';
 import {inspectAshbyGroups} from './ashby-form-groups.js';
 import {attachMongoSurvey,observeMongoSurvey,fillVoluntarySurveyField} from './mongo-voluntary-survey.js';
@@ -10,6 +11,7 @@ import {CodexBrowserAdapter} from './browser-adapter.js';
 import {digest,samePosting,supportedPosting} from './applications.js';
 import {optionForAnswer,sameAnswer} from './application-values.js';
 import {livePostingEvidence} from './sources.js';
+import {caylentRenderedLocation,caylentTemplatePosting} from './caylent-location.js';
 import {matchesAshbyRemoteOptions,nationwideUSRemote,qualifiedUSRemote,requiresLocalResidence} from './location.js';
 
 // A native transport: no Codex connection, browser extension, CDP attachment,
@@ -80,16 +82,23 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
    inspection.location=embeddedEvidence.location;
   }
   if(new URL(job.url).hostname==='jobs.ashbyhq.com')inspection.description=overview;
+  const caylentTemplate=caylentTemplatePosting(job);
+  if(caylentTemplate)inspection.location='Location restrictions require review';
   try{
    const evidence=embeddedEvidence||await loadEvidence(),norm=s=>String(s).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
    if(evidence&&norm(evidence.title)===norm(job.title)&&evidence.posting===job.url){
     if (embed||['boards.greenhouse.io','job-boards.greenhouse.io'].includes(new URL(job.url).hostname)) enrichGreenhouseFields(inspection.form.fields,evidence.publicForm);
+    await verifyCaylentGender(tab.page,job,inspection.form,evidence.publicForm);
     inspection.compensation=evidence.compensation;inspection.publicEvidence={posting:job.url,sourceUrl:evidence.sourceUrl,checkedAt:new Date().toISOString()};
     if(evidence.location&&nationwideUSRemote(inspection.location)&&!nationwideUSRemote(evidence.location))inspection.location=evidence.location;
     const listingText=applicationText+'\n'+overview;
     const ashbyRemote=new URL(job.url).hostname==='jobs.ashbyhq.com' && evidence.location==='Remote, United States';
     const scoped=listingText.split(/\r?\n/).find(line=>qualifiedUSRemote(line) && !(ashbyRemote && matchesAshbyRemoteOptions(line,evidence.locationOptions)));
-    if(scoped)inspection.location=scoped;
+    if(caylentTemplate){
+     const header=tab.page.locator('.job__header .job__location'),body=tab.page.locator('.job__description');
+     if(evidence.caylentRemote && await header.count()===1 && await body.count()===1) inspection.location=caylentRenderedLocation((await header.innerText()).trim(),await body.innerText(),evidence.caylentRemote);
+    }
+    else if(scoped)inspection.location=scoped;
     else if(evidence.location==='Remote, United States'&&!/Location Type\s*(?:Hybrid|On.?site)|\bexcept\b|\bexcluding\b|only (?:candidates|residents)|not eligible|must (?:reside|live|relocate)|\brequired.*(?:onsite|on-site|office)\b/i.test(listingText))inspection.location=evidence.location;
    }
   }catch{/* Missing public evidence remains a hold, never a guessed salary. */}
@@ -144,6 +153,12 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   for(const {field,value} of actions){
    await checkDestination();
    this.lastControl=field.label;
+   if(caylentGenderControl(inspection.job,field)){
+    if(!field.caylentGenderVerified || !field.caylentGenderAuthorized)throw Error('A posting-specific applicant choice is required');
+    if(field.value && (field.value!==value || field.committedChoices>1))throw Error('Existing Caylent choice differs from the posting authorization');
+    if(field.value!==value)await fillCaylentGender(tab.page,inspection.job,field,value);
+    continue;
+   }
    if(field.surveyChoiceVerified){
     await fillVoluntarySurveyField(tab.page,this.locator(tab,field),{published:inspection.surveyEvidence,
      survey:inspection.form.voluntarySurvey,field,value});
@@ -187,11 +202,31 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   this.uploads[inspection.job.id]={filename:path.basename(resume),label:inspection.form.resume.label,sha256:digest(await readFile(resume)),uploadedAt:new Date().toISOString()};
   return {resumeUpload:this.uploads[inspection.job.id]};
  }
- async submit(inspection){
-  const page=inspection.tab.page;await page.bringToFront();
+ async checkSubmitDestination(inspection){
+  const page=inspection.tab.page;
+  if(!samePosting(page.url(),inspection.job.url))throw Error('Application destination changed');
   await verifyMongoForm(page,inspection.job);
   await guardRecruiterflow(page,inspection.job,this.uploads[inspection.job.id]?.filename);
-  if(!samePosting(page.url(),inspection.job.url))throw Error('Application destination changed');
+ }
+ async finalButtonHold(inspection){
+  try{await this.checkSubmitDestination(inspection);}catch{return 'destination';}
+  try{
+   const button=this.finalButton(inspection);
+   if(await button.count()!==1)return 'ambiguous';
+   if(!await button.isVisible())return 'hidden';
+   if(!await button.isEnabled())return 'disabled';
+   // This exercises Playwright's stability and hit-target checks without dispatching a click.
+   // The real click below can still fail after the durable submission record is written.
+   await button.click({trial:true,timeout:2500});
+   return null;
+  }catch(error){
+   if(/intercepts pointer events/i.test(String(error?.message)))return 'covered';
+   return 'unavailable';
+  }
+ }
+ async submit(inspection){
+  const page=inspection.tab.page;await page.bringToFront();
+  await this.checkSubmitDestination(inspection);
   const events=[];this.submissionEvidence={at:new Date().toISOString(),jobId:inspection.job.id,events};
   const record=(request,status)=>{try{const url=new URL(request.url());if(events.length<40&&['POST','PUT'].includes(request.method()))events.push({origin:url.origin,path:url.pathname,method:request.method(),status});}catch{}};
   const response=r=>record(r.request(),r.status()),failed=r=>record(r,'request_failed');page.on('response',response);page.on('requestfailed',failed);

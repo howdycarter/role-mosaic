@@ -1,3 +1,4 @@
+import {caylentGenderControl} from './caylent-gender.js';
 import {recruiterflowRoute,recruiterflowExperience} from './recruiterflow.js';
 import {isAshbyRecruitmentNotice} from './ashby-recruitment-privacy.js';
 import {cleanField} from './posting-permission.js';
@@ -15,6 +16,9 @@ import {greenhousePosting, applicationPosting, approvedPostingPermission, bindOb
 export { optionForAnswer, sameAnswer } from './application-values.js';
 
 export const digest = value => createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');
+const finalButtonReasons={destination:'Application destination or form changed',ambiguous:'The final Submit button is missing or ambiguous',
+ hidden:'The final Submit button is hidden',disabled:'The final Submit button is disabled',covered:'Another element covers the final Submit button',
+ unavailable:'The final Submit button did not become actionable'};
 export function submissionHold(policy,adapter){if(policy.submissionMode!=='automatic')return 'review_only';if(adapter?.transport==='playwright'&&policy.automationRiskAcknowledged!==true)return 'automation_risk_unacknowledged';return null;}
 async function qualityGate(store,ctx,job,packet,adapter){
  const live=(await store.read('jobs.json',[])).find(j=>j.id===job.id);
@@ -166,7 +170,9 @@ export function fillPlan(form,profile,{postingKey:scope,company,inboxAnswer,job,
   if(field.type==='select'&&/^(?:location(?: \(city\))?|current location|what location do you intend to work from\?)\*?$/i.test(field.label.trim()))field.locationKnown={city:profile.facts.city,state:profile.facts.state,stateCode:profile.facts.stateCode,country:profile.facts.country};
   const authorized=permission?.fields.find(f=>f.id===field.id && f.type===field.type && f.label===cleanField(field.label));
   if(isAshbyRecruitmentNotice(job,field) && authorized?.kind!=='recruitment-privacy'){if(field.required)missing.push(field.label);continue;}
-  let value=field.experienceKey ? undefined : authorized?.answer ?? answerFor(field,profile);
+  const caylentChoice=caylentGenderControl(job,field);
+  if(caylentChoice && (!field.caylentGenderVerified || !inboxAnswer)){if(field.required)missing.push(field.label);continue;}
+  let value=(field.experienceKey || caylentChoice) ? undefined : authorized?.answer ?? answerFor(field,profile);
   if(field.required && (value===undefined || value===null || value==='') && inboxAnswer) {
    value=inboxAnswer(field);
    if(value!==undefined && value!==null && value!=='') {
@@ -181,7 +187,7 @@ export function fillPlan(form,profile,{postingKey:scope,company,inboxAnswer,job,
   if(['password','hidden'].includes(field.type)||(/password|signature|typing my name|type your name|consent|certif(?:y|ication)/i.test(field.label)||personalAgreement)&&!consent){missing.push(`Manual action: ${field.label}`);continue;}
   if(field.type!=='checkbox'&&field.value&&!sameAnswer(field,field.value,value)){missing.push(`Existing value differs: ${field.label}`);continue;}
   const surveyChoice=authorized && permission.fields.some(f=>f.kind==='survey-decline');
-  actions.push({field:surveyChoice?{...field,surveyChoiceVerified:true,...(consent?{consentVerified:true}:{})}:
+  actions.push({field:caylentChoice?{...field,caylentGenderAuthorized:true}:surveyChoice?{...field,surveyChoiceVerified:true,...(consent?{consentVerified:true}:{})}:
     consent?{...field,consentVerified:true}:field,value:String(value)});
  }
  if(!form.resume)missing.push('Supported resume upload');
@@ -485,6 +491,17 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
     }
     if(!check.ok||check.captcha||check.manual){attempt.status='held';attempt.reason=check.reason||'Readback, CAPTCHA or manual action required';await save();results.push({...attempt});continue;}
     if(!await shouldContinue()){attempt.status='held';attempt.reason='Worker paused before submission';await save();results.push({...attempt});continue;}
+    if(adapter.transport==='playwright' && adapter.finalButtonHold){
+     adapter.lastControl='final button actionability';
+     const blocker=await adapter.finalButtonHold(activeInspection);
+     if(blocker){
+      // Record only static categories. Browser errors can contain field values and DOM fragments.
+      const code=Object.hasOwn(finalButtonReasons,blocker)?blocker:'unavailable';
+      attempt.status='held';attempt.reason=finalButtonReasons[code];attempt.finalButtonCheck={code,at:now().toISOString()};
+      await save();results.push({...attempt});continue;
+     }
+     delete attempt.finalButtonCheck;
+    }
     const current=await prerequisites(store,now());
     if(current.skippedPostings.has(applicationPosting(packet.job.url)?.key)||submissionHold(current.policy,adapter)||!(await qualityGate(store,current,packet.job,packet,adapter)).ok)throw Error('Submission mode or quality evidence changed');
     const currentAttempts=await store.read('application-ledger.json',[]),currentRestart=await restartException(store,packet.restartAuthorizationId,packet.job,current,currentAttempts,adapter,now(),attempt.id);
@@ -517,7 +534,9 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
      attempt.status='submission_unknown';await save(); // Durable before dispatch.
     }while(dayAt(now(),current.policy.timezone)!==attempt.day);
     if(attempt.status==='held'){results.push({...attempt});break;}
+    adapter.lastControl='final Submit dispatch';
     await adapter.submit(activeInspection);
+    adapter.lastControl='employer confirmation';
     const receipt=await adapter.confirm(activeInspection);
     if(receipt?.emailVerificationPending)attempt.emailVerificationPending=true;
     if(receipt?.transportEvidence)attempt.submissionEvidence=receipt.transportEvidence;

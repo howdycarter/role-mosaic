@@ -2,6 +2,7 @@ import {publishedMongoSurvey} from './mongo-voluntary-survey.js';
 import {publicGreenhouseForm} from './greenhouse-public-form.js';
 import {mongoEmbedRoute,verifyMongoEmbed} from './greenhouse-embed.js';
 import {ashbyLocation,nationwideUSRemote,requiresLocalResidence} from './location.js';
+import {caylentAnnualBase,caylentRemoteCandidate,verifyCaylentRemote} from './caylent-location.js';
 import {htmlText} from './career.js';
 const allowed = new Set(['greenhouse', 'lever', 'ashby']);
 function listingLocation(label,description) {
@@ -82,16 +83,19 @@ export async function fetchBoard(board, fetcher = fetch) {
   if ((board.type === 'greenhouse' && body.meta?.total != null && body.meta.total !== rows.length) ||
       body.hasMore === true || body.nextPage || body.meta?.nextPage) throw new Error('Incomplete employer board response');
   const seenAt = new Date().toISOString();
-  const jobs = rows.filter(j => board.type !== 'ashby' || j?.isListed !== false).map(j => ({
-    company: board.company, title: j.title || j.text || '',
-    location: listingLocation(board.type==='ashby'?ashbyLocation(j):typeof j.location === 'string' ? j.location : j.location?.name || j.categories?.location || '',j.descriptionPlain || j.content || j.descriptionHtml || j.description),
-    ...(board.type==='ashby' && j.secondaryLocations?.length ? {locationOptions:[j.location,...j.secondaryLocations.map(option=>option.location)]} : {}),
-    url: employerPostingUrl(board.type,j.absolute_url || j.hostedUrl || j.jobUrl,j.id),
-    source: `${board.type}/${board.slug}`, seenAt,
-    description: j.content || j.descriptionPlain || j.descriptionHtml || j.description || '',
-    sourceId: String(j.id),
-    compensation: board.type==='ashby'?ashbySalary(j.compensation):salaryFromText(j.content || j.descriptionPlain || j.descriptionHtml || ''),
-  }));
+  const jobs = rows.filter(j => board.type !== 'ashby' || j?.isListed !== false).map(j => {
+    const caylent = board.type === 'greenhouse' && caylentRemoteCandidate(board.slug, j);
+    return {
+      company: board.company, title: j.title || j.text || '',
+      location: caylent ? 'Remote, United States' : listingLocation(board.type==='ashby'?ashbyLocation(j):typeof j.location === 'string' ? j.location : j.location?.name || j.categories?.location || '',j.descriptionPlain || j.content || j.descriptionHtml || j.description),
+      ...(board.type==='ashby' && j.secondaryLocations?.length ? {locationOptions:[j.location,...j.secondaryLocations.map(option=>option.location)]} : {}),
+      url: employerPostingUrl(board.type,j.absolute_url || j.hostedUrl || j.jobUrl,j.id),
+      source: `${board.type}/${board.slug}`, seenAt,
+      description: j.content || j.descriptionPlain || j.descriptionHtml || j.description || '',
+      sourceId: String(j.id),
+      compensation: board.type==='ashby'?ashbySalary(j.compensation):caylent?caylentAnnualBase(j.content):salaryFromText(j.content || j.descriptionPlain || j.descriptionHtml || ''),
+    };
+  });
   for(const job of jobs){
     if(typeof job.title!=='string'||!job.title.trim())throw new Error('Incomplete employer posting in board response');
   }
@@ -136,7 +140,10 @@ export async function livePostingEvidence(job,fetcher=fetch,rules={}){
    pay={min:ranges[0].min_cents/100,max:ranges[0].max_cents/100,currency:'USD',interval:'year',periodAssumed:true,evidence:'Employer USD base-only range; applicant-authorized conventional annual-period assumption'};
   }
   if(!pay)pay=salaryFromText(j.content||'',{allowAnnualBaseAssumption:assumptionAllowed,location:j.location?.name});
-  return {title:j.title,location:listingLocation(j.location?.name||'',j.content),compensation:pay,posting:job.url,sourceUrl,
+  const candidate=caylentRemoteCandidate(slug,j);
+  const caylent=candidate && await verifyCaylentRemote(j,candidate,fetcher);
+  return {title:j.title,location:caylent?'Remote, United States':listingLocation(j.location?.name||'',j.content),
+   ...(caylent?{caylentRemote:candidate}:{}),compensation:candidate?caylentAnnualBase(j.content):pay,posting:job.url,sourceUrl,
    ...(embed?{applicationUrl:embed.url,description:htmlText(htmlText(j.content||''))}:{}),
    ...(rules.includeQuestions?{publicForm:publicGreenhouseForm(j.questions),...(embed?{survey:publishedMongoSurvey(j.demographic_questions)}:{})}:{})};
  }

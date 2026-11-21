@@ -1,3 +1,4 @@
+import {caylentGenderPurpose,caylentGenderQuestion} from './caylent-gender.js';
 // Private, local grants for questions actually observed on a Greenhouse form.
 import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
@@ -58,6 +59,10 @@ function question(field, form, posting) {
   if (nativeChoice ? !posting.board.startsWith('jobs.ashbyhq.com/') || !field.id : !supported.has(field.type)) return null;
   const label = normalize(field.label).replace(/\s*\*+$/, '').trim();
   const help = normalize(field.description || field.helpText || '');
+  if(caylentGenderQuestion(posting,field,form)){
+    const purpose=caylentGenderPurpose;
+    return {key:digest([purpose,label,field.id,field.options]),label,type:'select',options:field.options,scopes:['posting'],purpose};
+  }
   if (!label || label.length > 500 || help.length > 1200 || manual.test(label + ' ' + help)) return null;
   if (!Array.isArray(form?.fields) || form.fields.filter(f => normalize(f.label).replace(/\s*\*+$/, '').trim() === label).length !== 1) return null;
   let options = [];
@@ -254,6 +259,15 @@ export async function decidePostingPermission({store,id,jobId,revision,decision}
     const state=await readGreenhouseAnswers(store), profileSha256=await activeProfileHash(store);
     const live=await liveObservations(store,state,profileSha256);
     const o=live.find(o=>o.channel==='worker' && o.jobId===jobId && o.stamp===revision && o.proposal?.id===id);
+    if(!o && decision==='skip'){
+      const personal=live.find(row=>row.channel==='worker' && row.jobId===jobId && row.stamp===revision &&
+        row.questions.some(q=>q.purpose===caylentGenderPurpose && groupId(state,row,q)===id));
+      if(personal){
+        (state.permissions??=[]).push({id:randomUUID(),requestId:id,decision,postingKey:personal.key,jobId,stamp:revision,profileSha256,
+          fields:[],company:personal.company,title:personal.title,confirmedAt:new Date().toISOString()});
+        await store.write(filename,state);return {jobIds:[]};
+      }
+    }
     if(!o)throw Error('This form or permission request changed. Refresh your inbox.');
     state.permissions??=[];
     const prior=state.permissions.find(p=>p.requestId===id && p.stamp===revision);
@@ -352,7 +366,7 @@ function summarize(state, observations) {
       if (grantFor(state, o, q)) continue;
       hasMissing = true;
       const id = groupId(state, o, q);
-      if (!groups.has(id)) groups.set(id, { id, label: q.label, type: q.type, options: q.options, scopes: q.scopes, help: q.help, postings: [] });
+      if (!groups.has(id)) groups.set(id, { id, label: q.label, type: q.type, options: q.options, scopes: q.scopes, help: q.help, ...(q.purpose?{purpose:q.purpose}:{}), postings: [] });
       const choices = groups.get(id).postings;
       if (!choices.some(p => p.jobId === o.jobId && p.channel === o.channel)) {
         choices.push({ jobId: o.jobId, company: o.company, title: o.title, url: o.url, channel: o.channel, revision: o.stamp });

@@ -1,3 +1,4 @@
+import {caylentGenderControl} from './caylent-gender.js';
 // A fresh posting can propose previously verified answers from this employer.
 // Only the applicant can authorize the exact displayed disclosure and recipient.
 import {digest} from './applications.js';
@@ -50,6 +51,7 @@ export function permissionProposal({job,form,missing,profile,posting,priorPostin
  const labels = new Set(missing.map(cleanField));
  const fields = [];
  for(const field of form.fields) {
+  if(caylentGenderControl(job,field))continue;
   const label = cleanField(field.label);
   if(!labels.has(label) && (field.required || field.type !== 'checkbox'))continue;
   if(form.fields.filter(f=>cleanField(f.label)===label).length!==1)continue;

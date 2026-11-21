@@ -12,8 +12,8 @@
 #runStatus:empty{display:none}.inbox-content{border-top:1px solid #d6dfd9;margin-top:20px;padding-top:20px}
 nav{flex-wrap:wrap}
 @media(max-width:540px){body{margin:16px auto;padding:0 12px}.panel{padding:16px}.run-toolbar{align-items:stretch;flex-direction:column;gap:12px}#workerRun{width:100%}}
-#inboxReviews details{margin:12px 0}#inboxReviews summary{cursor:pointer}#inboxReviews nav{display:flex;align-items:center;flex-wrap:wrap;gap:10px}
-#inboxReviews :is(input:not([type=checkbox]),textarea,select){display:block;box-sizing:border-box;width:min(100%,42rem);min-width:0}#inboxReviews input[type=checkbox]{min-width:0;margin-left:.5rem}#inboxReviews fieldset{min-width:0}
+.inbox-reviews details{margin:12px 0}.inbox-reviews summary{cursor:pointer}.inbox-reviews nav{display:flex;align-items:center;flex-wrap:wrap;gap:10px}
+.inbox-reviews :is(input:not([type=checkbox]),textarea,select){display:block;box-sizing:border-box;width:min(100%,42rem);min-width:0}.inbox-reviews input[type=checkbox]{min-width:0;margin-left:.5rem}.inbox-reviews fieldset{min-width:0}
 </style><script src="/inbox-reviews.js" defer></script><script src="/inbox.js" defer></script>
 <header><h1>RoleMosaic</h1></header>
 <div id="inbox" class="panel">
@@ -25,9 +25,13 @@ nav{flex-wrap:wrap}
   <section class="inbox-content" aria-labelledby="inboxTitle">
 <h2 id="inboxTitle" tabindex="-1">Needs your input</h2>
 <p id="inboxSummary">Loading application questions…</p>
-<div id="inboxList"></div><div id="inboxReviews"></div><p id="inboxNotice" role="status"></p><div id="checkedQuestions"></div>
+<section id="inboxEmployer" hidden><h3>Employer questions and permissions</h3><div id="inboxList"></div></section>
+<section id="inboxEvidence" class="inbox-reviews" hidden><h3>Experience to confirm</h3><div id="inboxReviews"></div></section>
+<section id="inboxChallenges" class="inbox-reviews" hidden><h3>Employer verification</h3><div id="inboxChallengeList"></div></section>
+<p id="inboxNotice" role="status"></p><div id="checkedQuestions"></div>
 <details id="savedGreenhouse" hidden><summary>Saved application answers</summary><div id="savedGreenhouseList"></div></details>
 </section>
+<details id="inboxTracking" class="inbox-reviews" hidden><summary id="inboxTrackingSummary">Application tracking</summary><div id="inboxTrackingList"></div></details>
 </div>
 <div class="panel"><strong id="summary">Loading your search…</strong><p id="rules"></p><p id="gate"></p><p id="discoveryState"></p></div>
 <section class="panel"><h2>Research and preparation</h2><p id="workerState">Worker stopped</p><p>Manual final submission is the default. Mosaic prepares source-backed packets and selects a résumé for the role. Nothing is filled, uploaded or submitted in this mode.</p><nav><button id="prepareLocal">Prepare evidence packets</button><button id="refresh">Refresh job boards</button><button id="receiptRefresh">Refresh employer confirmations</button><button id="workerStart">Schedule research</button><button id="workerPause">Pause worker</button></nav><details><summary>Experimental automatic submission</summary><p>Automated browsers can identify themselves as automated. This may affect screening. No tool can guarantee interviews or prevent employer rejection. Automatic execution requires a current evidence review, matching approved track PDF and application authorization.</p><label>Approved résumé for automatic applications <select id="automaticTrack"></select></label><label><input id="automationRisk" type="checkbox" style="min-width:0"> I understand that browser automation is detectable.</label><nav><button id="automaticEnable" disabled>Enable experimental automatic mode</button><button id="automaticDisable">Use manual final submission</button><button id="workerSubmit">Run authorized automatic packets</button></nav></details><pre id="workerDetails"></pre></section><section class="panel"><h2>Evidence packets</h2><p>Each packet shows the requirements, source-backed proof, case studies and selected résumé. A draft is not approval or submission.</p><div id="qualityPackets"></div><pre id="evidenceIssues"></pre></section>

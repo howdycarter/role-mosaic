@@ -62,8 +62,15 @@ test('scoped Ashby and Lever decisions are per-posting, retain unsafe controls i
   inbox=await readDecisionInbox(store);assert.deepEqual(inbox.reviews.map(r=>r.kind),['receipt','form']);
   assert.equal(inbox.items.length,1);
 });
-test('applicant completes an evidence and specialization review in the dashboard inbox', {skip:process.env.MOSAIC_BROWSER_TESTS!=='1',timeout:30000},async t=>{
+test('dashboard separates current verification from passive tracking and retains qualification review', {skip:process.env.MOSAIC_BROWSER_TESTS!=='1',timeout:30000},async t=>{
   const store=await fixture(t);
+  const attempts = [
+    {id:'old-receipt',jobId:'old',url:'https://job-boards.greenhouse.io/example/jobs/105',company:'Previous',title:'Unverified receipt',status:'submission_unknown'},
+    {id:'draft',jobId:'draft',url:'https://job-boards.greenhouse.io/example/jobs/106',company:'Previous',title:'Held draft',status:'held'},
+    {id:'verification',jobId:'waiting',url:'https://job-boards.greenhouse.io/example/jobs/107',company:'Current',title:'Original email challenge',status:'submission_unknown',
+      emailVerificationPending:true,verificationCheckpoint:{schema:2},verificationDashboardPort:4322},
+  ];
+  await store.write('application-ledger.json',attempts);
   const child=spawn(process.execPath,[new URL('../src/server.js',import.meta.url).pathname],{
     env:{...process.env,ROLEMOSAIC_HOME:store.root,PORT:'0'},stdio:['ignore','pipe','pipe']});
   let browser;
@@ -74,7 +81,14 @@ test('applicant completes an evidence and specialization review in the dashboard
     const page=await browser.newPage(),outbound=[];page.setDefaultTimeout(6000);
     await page.route('**/*',r=>{if(new URL(r.request().url()).origin===base)return r.continue();outbound.push(r.request().url());return r.abort();});
     await page.goto(base+'/#inbox');
-    await page.locator('#inboxReviews summary').first().click();
+    await page.locator('#inboxSummary').getByText('1 verification',{exact:true}).waitFor();
+    assert.equal(await page.locator('#inboxTracking').evaluate(node=>node.open),false);
+    assert.equal(await page.locator('#inboxTrackingSummary').textContent(),'Application tracking (3)');
+    assert.equal(await page.locator('#inboxReviews summary').count(),0);
+    await page.locator('#inboxChallengeList summary').click();
+    assert.equal(await page.locator('#inboxChallengeList a').getAttribute('href'),'http://127.0.0.1:4322/#attempt-verification');
+    await page.locator('#inboxTrackingSummary').click();
+    await page.locator('#inboxTrackingList summary').filter({hasText:'Review qualifications'}).click();
     await page.getByRole('button',{name:'Review this role',exact:true}).click();
     await page.getByLabel('Exact wording from the posting').fill(posting.description);
     await page.getByLabel('Assessment',{exact:true}).selectOption('supported');
@@ -91,7 +105,14 @@ test('applicant completes an evidence and specialization review in the dashboard
     const ic=policy.individualContributorReviews[0];assert.equal(ic.profileSha256,policy.standingAuthorization.profileSha256);
     assert.equal(meetsContributorRule(posting,policy,new Date(Date.parse(ic.reviewedAt)+86400001)),false);
     assert.deepEqual((await store.read('quality-reviews.json')).role.requirements,[requirement]);
-    assert.deepEqual(await store.read('application-ledger.json',[]),[]);assert.deepEqual(outbound,[]);
+    assert.deepEqual(await store.read('application-ledger.json',[]),attempts);
+    const closed = attempts.map(row=>row.id==='verification'?{...row,emailVerificationPending:false}:row);
+    await store.write('application-ledger.json',closed);
+    await page.evaluate(()=>window.dispatchEvent(new Event('mosaic-run-finished')));
+    await page.getByText('Nothing needs your input right now.',{exact:true}).waitFor();
+    assert.equal(await page.locator('#inboxChallenges').isVisible(),false);
+    assert.ok(await page.locator('#inboxTrackingList').getByText(/Original email challenge/).count());
+    assert.deepEqual(outbound,[]);
   } finally {await browser?.close();if(child.exitCode===null&&!child.signalCode){const exited=once(child,'exit');child.kill();await exited;}}
 });
 

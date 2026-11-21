@@ -80,9 +80,27 @@
     }
     input.required = true;
     labeled(fieldset, 'Your answer', input);
-    const button = element('button', 'Save answer and continue');
+    const postingChoice=item.purpose==='caylent-posting-gender';
+    let consent;
+    if(postingChoice){
+      consent=element('input');consent.type='checkbox';consent.required=true;
+      labeled(fieldset,'I authorize Mosaic to send my selected answer to Caylent for this application.',consent);
+    }
+    const button = element('button', postingChoice?'Confirm this answer and continue':'Save answer and continue');
     button.type = 'submit';
     fieldset.append(button);
+    if(postingChoice){
+      const posting=selected(),open=element('a','Open the employer form');
+      open.href=posting.url;open.target='_blank';open.rel='noopener noreferrer';
+      const skip=element('button','Skip this application');skip.type='button';
+      skip.onclick=async()=>{
+        fieldset.disabled=true;
+        try{const result=await api('/api/inbox/posting-permission',{id:item.id,jobId:posting.jobId,revision:posting.revision,decision:'skip'});
+          notice.textContent=result.output;await refresh();
+        }catch(error){notice.textContent=error.message;}finally{fieldset.disabled=false;}
+      };
+      fieldset.append(skip,open);
+    }
     form.append(fieldset);
     form.onsubmit = async event => {
       event.preventDefault();
@@ -91,7 +109,7 @@
       try {
         const result = await api('/api/inbox/answer', {
           id: item.id, jobId: p.jobId, channel: p.channel, revision: p.revision,
-          scope: scope.value, answer: input.value, confirm: true,
+          scope: scope.value, answer: input.value, confirm: postingChoice ? consent.checked : true,
         });
         notice.textContent = result.output;
         await refresh();
@@ -191,21 +209,50 @@
       if (old) old.node.replaceWith(node); else list.append(node);
       cards.set(item.id, { stamp, node });
     }
-    const reviews=inbox.reviews || [];
-    const currentReviews=new Set();
+    const reviews = inbox.reviews || [];
+    const currentReviews = new Set();
+    const localVerifications = new Set((typeof state !== 'undefined' && state?.applications?.attempts || [])
+      .filter(attempt => attempt.canVerifyEmail).map(attempt => attempt.id));
+    let evidenceQuestions = 0, verifications = 0, tracked = 0;
     for (const row of reviews) {
-      const id=row.attemptId ? 'attempt:'+row.attemptId : 'job:'+row.jobId, stamp=JSON.stringify(row);
+      let destination = 'inboxTrackingList';
+      if (row.kind === 'evidence' && row.focusedEvidence && row.questions?.length) {
+        destination = 'inboxReviews';
+        evidenceQuestions += row.questions.length;
+      } else if (row.kind === 'receipt' && (localVerifications.has(row.attemptId) ||
+          (Number.isInteger(row.verificationDashboardPort) && row.verificationDashboardPort >= 1024 &&
+           row.verificationDashboardPort <= 65535 && String(row.verificationDashboardPort) !== location.port))) {
+        destination = 'inboxChallengeList';
+        verifications++;
+      } else if (row.kind === 'posting' && row.reason === 'Employer sign-in required') {
+        destination = 'inboxChallengeList';
+        verifications++;
+      } else {
+        tracked++;
+      }
+      const container = byId(destination) || byId('inboxReviews');
+      const id = row.attemptId ? 'attempt:'+row.attemptId : 'job:'+row.jobId, stamp = JSON.stringify(row);
       currentReviews.add(id);
-      const old=reviewCards.get(id);
-      if(old?.stamp===stamp || old?.node.querySelector('form'))continue;
-      const node=renderInboxReview(row,api,refresh);
-      if(old){node.open=old.node.open;old.node.replaceWith(node);}else byId('inboxReviews').append(node);
-      reviewCards.set(id,{node,stamp});
+      const old = reviewCards.get(id);
+      if (old?.stamp === stamp || old?.node.querySelector('form')) {
+        if (old.node.parentNode !== container) container.append(old.node);
+        continue;
+      }
+      const node = renderInboxReview(row, api, refresh);
+      if (old) { node.open = old.node.open; old.node.replaceWith(node); }
+      if (node.parentNode !== container) container.append(node);
+      reviewCards.set(id, {node,stamp});
     }
-    for(const [id,card] of reviewCards)if(!currentReviews.has(id)){card.node.remove();reviewCards.delete(id);}
-    byId('inboxSummary').textContent = count || reviews.length
-      ? count+(count===1?' question':' questions')+' to answer · '+reviews.length+(reviews.length===1?' application':' applications')+' to review.'
-      : 'Nothing needs your input right now.';
+    for (const [id,card] of reviewCards) if (!currentReviews.has(id)) { card.node.remove(); reviewCards.delete(id); }
+    for (const [section, size] of [['inboxEmployer',count],['inboxEvidence',evidenceQuestions],
+      ['inboxChallenges',verifications],['inboxTracking',tracked]]) {
+      if (byId(section)) byId(section).hidden = size === 0;
+    }
+    if (byId('inboxTrackingSummary')) byId('inboxTrackingSummary').textContent = 'Application tracking (' + tracked + ')';
+    const totals = [[inbox.items.length,'employer question'],[(inbox.permissions || []).length,'permission'],
+      [evidenceQuestions,'experience question'],[verifications,'verification']]
+      .filter(([n])=>n>0).map(([n,label])=>n+' '+label+(n===1?'':'s'));
+    byId('inboxSummary').textContent = totals.length ? totals.join(' · ') : 'Nothing needs your input right now.';
     renderSaved(inbox.savedAnswers);
   }
 
