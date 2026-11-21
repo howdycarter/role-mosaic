@@ -2,12 +2,13 @@ import { canonical, createHistoryLookup, evaluate } from './core.js';
 import { postingKey, samePosting } from './applications.js';
 import { roleTrack, tracks } from './quality.js';
 import { employerPostingUrl, livePostingEvidence } from './sources.js';
+import { mongoEmbedRoute } from './greenhouse-embed.js';
 
 // Some employers publish Greenhouse requisitions on their own careers domain.
 export async function inspectShortlistPosting(job, fetcher = fetch, search = {}) {
   const url = new URL(job.url);
   const board = /^greenhouse\/([a-z0-9_-]+)$/i.exec(job.source || '');
-  if (!board || ['boards.greenhouse.io', 'job-boards.greenhouse.io'].includes(url.hostname)) {
+  if (!board || mongoEmbedRoute(job.url) || ['boards.greenhouse.io', 'job-boards.greenhouse.io'].includes(url.hostname)) {
     return livePostingEvidence(job, fetcher, search);
   }
   const id = url.searchParams.get('gh_jid');

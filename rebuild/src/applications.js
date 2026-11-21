@@ -1,4 +1,5 @@
 import {cleanField} from './posting-permission.js';
+import {mongoEmbedRoute} from './greenhouse-embed.js';
 import { readFile, mkdir, open, rename, writeFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -47,17 +48,22 @@ export const dayAt = (date, timezone) => new Intl.DateTimeFormat('en-CA',{timeZo
 const questionLabel=value=>String(value).replace(/[*:]/g,'').replace(/\s+/g,' ').trim();
 export function postingKey(raw) {
  const u=new URL(raw);if(u.protocol!=='https:'||u.username||u.password)throw Error('Posting must use HTTPS without credentials');
- const gh=u.searchParams.get('gh_jid')||(/(?:greenhouse\.io)$/.test(u.hostname)?u.pathname.match(/\/jobs\/(\d+)/)?.[1]:null);
+ const gh=mongoEmbedRoute(raw)?.id||u.searchParams.get('gh_jid')||(/(?:greenhouse\.io)$/.test(u.hostname)?u.pathname.match(/\/jobs\/(\d+)/)?.[1]:null);
  if(gh)return `greenhouse:${gh}`;
  if(['jobs.ashbyhq.com','jobs.lever.co'].includes(u.hostname)){const id=u.pathname.match(/[0-9a-f]{8}-[0-9a-f-]{27,}/i)?.[0];if(id)return `${u.hostname}:${id.toLowerCase()}`;}
  return canonical(raw);
 }
 export function supportedPosting(url) {
+ if(mongoEmbedRoute(url))return true;
  try{const u=new URL(url);return u.protocol==='https:'&&!u.username&&!u.password&&['job-boards.greenhouse.io','boards.greenhouse.io','jobs.ashbyhq.com','jobs.lever.co'].includes(u.hostname);}catch{return false;}
 }
 export function samePosting(a,b){
  try{
   const left=new URL(a),right=new URL(b);
+  if(mongoEmbedRoute(a)||mongoEmbedRoute(b)){
+   const intended=greenhousePosting(a),observed=greenhousePosting(b);
+   return !!intended && !!observed && intended.key===observed.key;
+  }
   if(left.origin!==right.origin)return false;
   if(['boards.greenhouse.io','job-boards.greenhouse.io'].includes(left.hostname)){
    const job=greenhousePosting(a),other=greenhousePosting(b);
@@ -567,10 +573,28 @@ export async function reconcileApplications({home,adapter,now=()=>new Date()}) {
     const job={id:attempt.jobId,title:attempt.title,company:attempt.company,url:attempt.url};
     const inspection=attempt.status==='submitted'||adapter.recoverReceipt?null:await adapter.inspect(job,{tabId:attempt.tabId});
     const receipt=attempt.status==='submitted'?attempt.receipt:adapter.recoverReceipt?await adapter.recoverReceipt(attempt):await adapter.confirm(inspection);
-    if(!receipt?.confirmed||!receipt.text||!samePosting(receipt.posting,attempt.url)){if(receipt?.emailVerificationPending&&attempt.verificationCheckpoint&&!attempt.emailVerificationPending){attempt.emailVerificationPending=true;await store.write('application-ledger.json',ledger);}results.push({jobId:attempt.jobId,status:'submission_unknown'});continue;}
-    attempt.status='submitted';attempt.reason=null;attempt.receipt={...receipt,verifiedAt:now().toISOString(),resumeSha256:attempt.resumeSha256};attempt.updatedAt=now().toISOString();await store.write('application-ledger.json',ledger);
-    const history=await store.read('history.json',[]);if(!history.some(r=>r.receiptId===attempt.id)){history.push({company:attempt.company,role:attempt.title,posting:attempt.url,status:'submitted',submittedAt:now().toISOString(),receiptId:attempt.id});await store.write('history.json',history);}
-    const jobs=await store.read('jobs.json',[]),jobRecord=jobs.find(j=>j.id===attempt.jobId);if(jobRecord){jobRecord.status='applied';jobRecord.receiptId=attempt.id;await store.write('jobs.json',jobs);}
+    if(!receipt?.confirmed||![receipt.text,receipt.confirmationText].some(t=>typeof t==='string'&&t.trim())||!samePosting(receipt.posting,attempt.url)){if(receipt?.emailVerificationPending&&attempt.verificationCheckpoint&&!attempt.emailVerificationPending){attempt.emailVerificationPending=true;await store.write('application-ledger.json',ledger);}results.push({jobId:attempt.jobId,status:'submission_unknown'});continue;}
+    if(attempt.status==='submission_unknown'){
+     const verifiedAt=now().toISOString();
+     attempt.status='submitted';attempt.reason=null;attempt.submittedAt=verifiedAt;
+     attempt.receipt={...receipt,verifiedAt,resumeSha256:attempt.resumeSha256};attempt.updatedAt=verifiedAt;
+     await store.write('application-ledger.json',ledger);
+    }
+    const history=await store.read('history.json',[]);
+    const tracked=history.find(r=>r.receiptId===attempt.id && r.status==='submitted' && samePosting(r.posting,attempt.url));
+    // Older reconcilers refreshed verifiedAt on every read. The matching original
+    // tracker entry preserves the first confirmation across days and restarts.
+    if(!attempt.submittedAt){
+     const dates=[attempt.receipt.verifiedAt,tracked?.submittedAt].map(Date.parse).filter(Number.isFinite);
+     const first=dates.length?Math.min(...dates):Date.parse(attempt.createdAt);
+     if(Number.isFinite(first)){attempt.submittedAt=new Date(first).toISOString();await store.write('application-ledger.json',ledger);}
+    }
+    if(!history.some(r=>r.receiptId===attempt.id)){
+     history.push({company:attempt.company,role:attempt.title,posting:attempt.url,status:'submitted',submittedAt:attempt.submittedAt||now().toISOString(),receiptId:attempt.id});
+     await store.write('history.json',history);
+    }
+    const jobs=await store.read('jobs.json',[]),jobRecord=jobs.find(j=>j.id===attempt.jobId);
+    if(jobRecord&&(jobRecord.status!=='applied'||jobRecord.receiptId!==attempt.id)){jobRecord.status='applied';jobRecord.receiptId=attempt.id;await store.write('jobs.json',jobs);}
     results.push({jobId:attempt.jobId,status:'submitted'});
    }catch{results.push({jobId:attempt.jobId,status:attempt.status==='submitted'?'submitted_tracker_repair_needed':'submission_unknown'});}
   }

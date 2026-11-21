@@ -1,4 +1,5 @@
 import { ApplicationStore, postingKey, samePosting } from './applications.js';
+import { mongoEmbedRoute } from './greenhouse-embed.js';
 
 const stages = ['screen-invite', 'interview-invite', 'offer', 'rejected', 'closed', 'alternate-lead'];
 const progression = new Set(['screen-invite', 'interview-invite', 'offer']);
@@ -18,6 +19,13 @@ function receiptMatchesPosting(received, requested) {
     } catch { return null; }
   }
   try {
+    const embed = mongoEmbedRoute(requested);
+    if (embed) {
+      const receipt = mongoEmbedRoute(received);
+      if (receipt) return receipt.kind === 'form' && receipt.key === embed.key;
+      const hosted = hostedJob(received);
+      return !!hosted && hosted[0] === embed.board && hosted[1] === embed.id;
+    }
     if (![received, requested].some(raw => hosts.has(new URL(raw).hostname))) return samePosting(received, requested);
   } catch { return false; }
   const a = hostedJob(received), b = hostedJob(requested);

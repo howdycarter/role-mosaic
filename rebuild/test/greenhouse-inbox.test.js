@@ -111,6 +111,41 @@ test('sensitive prompts, unknown controls, ambiguous labels and other blockers s
   assert.deepEqual((await save(store, items[0], a, 'future', 'Two weeks')).jobIds, []);
 });
 
+test('Ashby native choices require exact observed options and a posting-bound answer', async t => {
+  const store = await workspace(t);
+  const ashby = {...a,url:'https://jobs.ashbyhq.com/example/12345678-1234-1234-1234-123456789012'};
+  await store.write('jobs.json',[ashby]);
+  const travel = {id:'travel',type:'button-choice',label:'Can you travel quarterly?',required:true,options:['Yes','No']};
+  const years = {id:'years',type:'radio-choice',label:'Years of experience?',required:true,options:['3–5','6+']};
+  const sensitive = [
+    {...travel,id:'pledge',label:'Your confirmation',options:['I accept','Decline']},
+    {...travel,id:'help',label:'Your selection',description:'This authorizes a background check.'},
+    {...travel,id:'links',label:'Your response',policyLinks:[{url:'https://example.invalid/privacy'}]},
+    {...years,id:'other',label:'Prior service',options:['Veteran','Other']},
+    {...years,id:'dupe',label:'Pick a range',options:['6+',' 6+ ']},
+  ];
+  const form = formFor(travel,years,...sensitive);
+  await see(store,ashby,form);
+  const {items,permissions}=await readGreenhouseInbox(store);
+  assert.equal(permissions,undefined);
+  assert.equal(items.length,2);
+  for(const [field,value] of [[travel,'Yes'],[years,'6+']]){
+    const item=items.find(i=>i.label===field.label);
+    assert.deepEqual(item.scopes,['posting']);assert.deepEqual(item.options,field.options);
+    await assert.rejects(save(store,item,ashby,'future',value),/scope|stale/);
+    await assert.rejects(save(store,item,ashby,'posting',value+' '),/valid answer/);
+    await save(store,item,ashby,'posting',value);
+    const state=await readGreenhouseAnswers(store);
+    const use=(job,field,form)=>greenhouseAnswerFor(state,{job,field,form,profileSha256});
+    assert.equal(use(ashby,field,form),value);
+    assert.equal(use(a,field,form),undefined);
+    const changed={...field,options:[...field.options].reverse()};
+    assert.equal(use(ashby,changed,formFor(changed)),undefined);
+  }
+  assert.deepEqual((await readGreenhouseAnswers(store)).permissions||[],[]);
+  assert.deepEqual(await greenhouseRetryJobs(store),[]);
+});
+
 test('posting-specific answer is pinned to the observed form, can be forgotten, and stale forms cannot recreate it', async t => {
   const store = await workspace(t);
   const field = { ...note, label: 'Describe the system this team should build.' }, form = formFor(field);

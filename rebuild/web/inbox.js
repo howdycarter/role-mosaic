@@ -67,7 +67,7 @@
     scope.onchange = showScope;
     showScope();
     let input;
-    if (item.type === 'select') {
+    if (['select', 'button-choice', 'radio-choice'].includes(item.type)) {
       input = element('select');
       input.add(new Option('Choose an answer', ''));
       for (const value of item.options) input.add(new Option(value, value));

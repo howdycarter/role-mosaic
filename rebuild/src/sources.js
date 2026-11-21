@@ -1,4 +1,5 @@
 import {publicGreenhouseForm} from './greenhouse-public-form.js';
+import {mongoEmbedRoute,verifyMongoEmbed} from './greenhouse-embed.js';
 import {ashbyLocation,nationwideUSRemote,requiresLocalResidence} from './location.js';
 import {htmlText} from './career.js';
 const allowed = new Set(['greenhouse', 'lever', 'ashby']);
@@ -97,17 +98,18 @@ export async function fetchBoard(board, fetcher = fetch) {
 }
 
 export async function livePostingEvidence(job,fetcher=fetch,rules={}){
- const url=new URL(job.url),parts=url.pathname.split('/').filter(Boolean),slug=decodeURIComponent(parts[0]||'');
+ const url=new URL(job.url),parts=url.pathname.split('/').filter(Boolean),embed=mongoEmbedRoute(job.url),slug=embed?.board||decodeURIComponent(parts[0]||'');
  if(!/^[a-zA-Z0-9_. -]{1,100}$/.test(slug))return null;
  if(url.hostname==='jobs.ashbyhq.com'){
   const jobs=await fetchBoard({type:'ashby',slug,company:job.company},fetcher),id=parts[1];
   const found=jobs.find(j=>new URL(j.url).pathname.split('/').filter(Boolean)[1]===id);return found?{...found,posting:job.url,sourceUrl:'https://api.ashbyhq.com/posting-api/job-board/'+encodeURIComponent(slug)+'?includeCompensation=true'}:null;
  }
- if(['job-boards.greenhouse.io','boards.greenhouse.io'].includes(url.hostname)){
-  const id=parts[2];if(!/^\d+$/.test(id||''))return null;
+ if(embed||['job-boards.greenhouse.io','boards.greenhouse.io'].includes(url.hostname)){
+  const id=embed?.id||parts[2];if(!/^\d+$/.test(id||''))return null;
   const sourceUrl='https://boards-api.greenhouse.io/v1/boards/'+encodeURIComponent(slug)+'/jobs/'+id+'?pay_transparency=true'+(rules.includeQuestions?'&questions=true':'');
   const response=await fetcher(sourceUrl,{redirect:'error',signal:AbortSignal.timeout(10000)});if(!response.ok)return null;const j=await response.json();
   if(String(j.id)!==id)return null;
+  if(embed && !await verifyMongoEmbed(job,embed,j,fetcher))return null;
   const metadata=j.metadata||[],fullTime=metadata.some(m=>m.name==='Time Type'&&/^full[ -]?time$/i.test(m.value||'')),salaried=metadata.some(m=>m.name==='Pay Rate Type'&&m.value==='Salary');
   const ranges=(j.pay_input_ranges||[]).filter(r=>r.currency_type==='USD'&&/base (?:salary|compensation)/i.test((r.title||'')+' '+(r.blurb||''))&&!/\bOTE\b|total compensation|hour|month|CAD/i.test((r.title||'')+' '+(r.blurb||''))&&Number.isFinite(r.min_cents)&&Number.isFinite(r.max_cents)&&r.max_cents>=r.min_cents);
   let pay=ranges.length===1&&fullTime&&salaried?{min:ranges[0].min_cents/100,max:ranges[0].max_cents/100,currency:'USD',interval:'year',evidence:'Employer Greenhouse base salary band with Full time / Salary metadata'}:null;
@@ -119,11 +121,22 @@ export async function livePostingEvidence(job,fetcher=fetch,rules={}){
    if(policy.ok&&(await policy.text()).replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').includes('Base salary is annual guaranteed pay'))pay={min:ranges[0].min_cents/100,max:ranges[0].max_cents/100,currency:'USD',interval:'year',evidence:'Employer US base-only salary band; annual period verified in employer compensation handbook',periodSource};
   }
   const assumptionAllowed=rules.allowAnnualBaseAssumption===true&&!metadata.some(m=>/part[ -]?time|contract|temporary|hourly|monthly|weekly/i.test(String(m.value||'')));
+  if(embed && assumptionAllowed && metadata.some(m=>m.name==='Employment Type' && m.value==='Full-time')){
+   const band=j.pay_input_ranges?.length===1?j.pay_input_ranges[0]:null;
+   const published=metadata.find(m=>m.name==='Job Post Range (United States)')?.value;
+   if (band?.currency_type==='USD' && /^MongoDB[’']s base salary range for this role in the U\.S\. is:$/i.test(band.title) &&
+       !otherPeriod.test(band.blurb||'') && published?.unit==='USD' &&
+       Number.isSafeInteger(band.min_cents) && Number.isSafeInteger(band.max_cents) && band.min_cents>0 && band.max_cents>=band.min_cents &&
+       Number(published.min_value)*100===band.min_cents && Number(published.max_value)*100===band.max_cents)
+    pay={min:band.min_cents/100,max:band.max_cents/100,currency:'USD',interval:'year',periodAssumed:true,
+     evidence:'Employer US base salary range matches US job-post salary metadata for full-time employment; applicant-authorized annual-period assumption'};
+  }
   if(!pay&&assumptionAllowed&&usLocation(j.location?.name)&&ranges.length===1&&!otherPeriod.test((ranges[0].title||'')+' '+(ranges[0].blurb||''))){
    pay={min:ranges[0].min_cents/100,max:ranges[0].max_cents/100,currency:'USD',interval:'year',periodAssumed:true,evidence:'Employer USD base-only range; applicant-authorized conventional annual-period assumption'};
   }
   if(!pay)pay=salaryFromText(j.content||'',{allowAnnualBaseAssumption:assumptionAllowed,location:j.location?.name});
   return {title:j.title,location:listingLocation(j.location?.name||'',j.content),compensation:pay,posting:job.url,sourceUrl,
+   ...(embed?{applicationUrl:embed.url,description:htmlText(htmlText(j.content||''))}:{}),
    ...(rules.includeQuestions?{publicForm:publicGreenhouseForm(j.questions)}:{})};
  }
  return null;

@@ -8,14 +8,16 @@ const sevenDays = 7 * 86400000;
 
 function readQualifications(description) {
   const start = /^(?:(?:required|minimum|basic|essential) (?:qualifications|requirements)|qualifications|requirements|what you(?:’|')ll (?:bring|need))[:.]?$/i;
-  const end = /^(?:p\s*referred qualifications|preferred requirements|nice.to.haves?|bonus(?: points)?|benefits(?: and perks)?|responsibilities|compensation(?: and benefits)?|about (?:us|the (?:company|team|role))|pay transparency)[:.]?$/i;
+  const optional = /^(?:p\s*referred (?:qualifications|requirements|backgrounds?|experience)|nice.to.haves?|bonus(?: points| qualifications)?|benefits(?: and perks)?|compensation(?: and benefits)?|pay transparency)[:.]?$/i;
+  const other = /^(?:responsibilities|about (?:us|the (?:company|team|role)))[:.]?$/i;
   const clauses = [];
   let section = 'unclassified', unclassifiedText = false;
   for (const raw of htmlText(htmlText(description || '')).split(/\n+/)) {
     const line = clean(raw);
     if (!line) continue;
     if (start.test(line)) section = 'required';
-    else if (end.test(line)) section = /^(?:p\s*referred|nice|bonus|benefits|compensation|pay transparency)/i.test(line) ? 'optional' : 'unclassified';
+    else if (optional.test(line)) section = 'optional';
+    else if (other.test(line)) section = 'unclassified';
     else if (section === 'required') clauses.push(line);
     else if (section === 'unclassified' || /\b(?:must|required to|mandatory|only eligible|need to have)\b/i.test(line)) unclassifiedText = true;
   }

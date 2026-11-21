@@ -1,6 +1,7 @@
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { digest, formDigest, samePosting } from './applications.js';
+import { mongoEmbedRoute } from './greenhouse-embed.js';
 import { optionForAnswer, sameAnswer } from './application-values.js';
 import { nationwideUSRemote, qualifiedUSRemote, requiresLocalResidence } from './location.js';
 
@@ -22,6 +23,7 @@ export function postingLocation(text){
 export class CodexBrowserAdapter {
  constructor(browser,{home,existingTabs={},verifiedReadbacks={},uploadedResumes={}}={}){this.browser=browser;this.home=home;this.verifiedReadbacks=verifiedReadbacks;this.uploads=uploadedResumes;this.existingTabs=existingTabs;this.tabs=new Map();this.estimatedCostUsd=0;}
  async inspect(job,{tabId}={}){
+  if(mongoEmbedRoute(job.url) && this.transport!=='playwright')throw Error('Embedded employer forms require the verified native transport');
   const known=tabId||this.existingTabs[job.id]||this.tabs.get(job.id)?.id;
   const tab=known?await this.browser.tabs.get(known):await this.browser.tabs.new();
   if(!known)await tab.goto(job.url);
@@ -134,7 +136,10 @@ export class CodexBrowserAdapter {
   do{
    const text=String(await inspection.tab.ax.get('state',{disableDiffing:true}));
    const page=await inspection.tab.playwright.evaluate(()=>({url:location.href,hasInputs:[...document.querySelectorAll('input,textarea,select')].some(e=>e.type!=='hidden'&&e.type!=='file'&&e.getAttribute('aria-hidden')!=='true'&&e.getClientRects().length>0),hasSubmit:[...document.querySelectorAll('button,input[type="submit"]')].some(e=>e.getClientRects().length>0&&/^(submit(?: application)?|send application)$/i.test((e.innerText||e.value||'').trim()))}));
-   const confirmed=samePosting(page.url,inspection.job.url)&&!page.hasInputs&&!page.hasSubmit&&/your application (?:was successfully submitted|has been (?:received|submitted))|thank you for (?:applying|your application)|application submitted successfully/i.test(text)&&! /\b(?:error|please complete|required field)\b/i.test(text);
+   const embed=mongoEmbedRoute(inspection.job.url);
+   // Never treat the employer landing page as a receipt for the embedded form.
+   const receiptHost=!embed || new URL(page.url).origin==='https://job-boards.greenhouse.io';
+   const confirmed=receiptHost&&samePosting(page.url,inspection.job.url)&&!page.hasInputs&&!page.hasSubmit&&/your application (?:was successfully submitted|has been (?:received|submitted))|thank you for (?:applying|your application)|application submitted successfully/i.test(text)&&! /\b(?:error|please complete|required field)\b/i.test(text);
    if(confirmed){
     const directory=path.join(this.home,'receipts');await mkdir(directory,{recursive:true,mode:0o700});
     const screenshot=path.join(directory,inspection.job.id+'.png');await writeFile(screenshot,await inspection.tab.screenshot({fullPage:false}),{mode:0o600});

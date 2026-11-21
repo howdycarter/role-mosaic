@@ -4,12 +4,16 @@ import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { digest } from './applications.js';
+import { mongoEmbedRoute } from './greenhouse-embed.js';
 import {cleanField, matchesPermissionFields, permissionProposal, requestIdentity} from './posting-permission.js';
 
 const filename = 'greenhouse-inbox.json';
 const emptyState = () => ({ version: 1, observations: [], grants: [] });
 const hosts = new Set(['boards.greenhouse.io', 'job-boards.greenhouse.io']);
 const supported = new Set(['text', 'textarea', 'number', 'select', 'email', 'tel', 'url']);
+const nativeChoices = new Set(['button-choice', 'radio-choice']);
+const acknowledgment = /\b(?:acknowledg\w*|authoriz(?:e|es|ing)|permission|release of (?:information|claims)|waiv\w*|opt[- ](?:in|out)|I (?:accept|decline|understand|permit|grant)|(?:may|can|could) we (?:record|contact|store|process|share|retain|disclose)|privacy policy|terms and conditions)\b/i;
+const permissionOption = /^(?:accept|decline|allow|deny|agree|disagree|I do not agree)$/i;
 const scopes = ['posting', 'employer', 'future'];
 
 // Cross-employer reuse is opt-in and limited to an exact, single-purpose
@@ -21,6 +25,8 @@ const normalize = value => String(value ?? '').replace(/\s+/g, ' ').trim();
 
 export function greenhousePosting(raw) {
   try {
+    const embed = mongoEmbedRoute(raw);
+    if (embed) return embed;
     const url = new URL(raw);
     if (url.protocol !== 'https:' || !hosts.has(url.hostname) || url.port || url.username || url.password) return null;
     const match = /^\/([a-z0-9_-]+)\/jobs\/(\d+)(?:\/(application|confirmation))?\/?$/i.exec(url.pathname);
@@ -45,16 +51,20 @@ export function applicationPosting(raw) {
 }
 
 function question(field, form, posting) {
-  if (!field || !field.required || !supported.has(field.type)) return null;
+  if (!field?.required) return null;
+  const nativeChoice = nativeChoices.has(field.type);
+  if (nativeChoice ? !posting.board.startsWith('jobs.ashbyhq.com/') || !field.id : !supported.has(field.type)) return null;
   const label = normalize(field.label).replace(/\s*\*+$/, '').trim();
   const help = normalize(field.description || field.helpText || '');
   if (!label || label.length > 500 || help.length > 1200 || manual.test(label + ' ' + help)) return null;
   if (!Array.isArray(form?.fields) || form.fields.filter(f => normalize(f.label).replace(/\s*\*+$/, '').trim() === label).length !== 1) return null;
   let options = [];
-  if (field.type === 'select') {
+  if (field.type === 'select' || nativeChoice) {
     if (!Array.isArray(field.options) || field.options.length > 300 || field.options.some(x => typeof x !== 'string' || x.length > 400)) return null;
     options = field.options.filter(x => x.trim() && !/^select(?: an? option)?[.…]*$/i.test(x.trim()));
     if (options.length === 0 || new Set(options.map(x => normalize(x).toLowerCase())).size !== options.length) return null;
+    if (nativeChoice && (field.policyLinks?.length || acknowledgment.test(label+' '+help) ||
+        options.some(option => manual.test(option) || acknowledgment.test(option) || permissionOption.test(option.trim())))) return null;
   }
   const key = digest([label, help, field.type, options, true]);
   const wording = label;
@@ -72,7 +82,7 @@ export function formStamp(job, form, {legacyHelp=false}={}) {
 
 function validValue(q, value) {
   if (typeof value !== 'string' || !value.trim() || value.length > 5000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) return false;
-  if (q.type === 'select') return q.options.includes(value);
+  if (q.type === 'select' || nativeChoices.has(q.type)) return q.options.includes(value);
   if (q.type === 'number') return /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value) && Number.isFinite(Number(value));
   if (q.type === 'email') return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
   if (q.type === 'url') {

@@ -26,6 +26,16 @@ const resume = {track:'fde',status:'approved',sha256:'approved-bytes'};
 const rows = clauses.map(text => ({text,status:'supported',evidenceIds:['delivery']}));
 const question = 'Which queue did you personally debug in production?';
 
+test('explicit optional headings end mandatory clauses and later requirements reopen them', () => {
+  for (const heading of ['Bonus Qualifications', 'Preferred Backgrounds:', 'Preferred Experience']) {
+    const posting = ['Qualifications', clauses[0], heading, 'Public sector experience.',
+      'Minimum Requirements', clauses[1]].join('\n');
+    assert.deepEqual(mandatoryClauses(posting), clauses);
+  }
+  const qualifier = 'Bonus Qualifications do not replace the mandatory certification.';
+  assert.deepEqual(mandatoryClauses('Requirements\n'+qualifier), [qualifier]);
+});
+
 test('Mosaic reuses only complete, compatible reviewed clauses and keeps the source review date',()=>{
   const prior=makeRoleReview(other,evidence,resume,'Actual reviewer',rows);
   assert.deepEqual(mandatoryClauses(description),clauses);

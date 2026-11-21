@@ -34,3 +34,21 @@ test('an invalid or empty campaign window fails closed',async t=>{
   await assert.rejects(campaignProgress(f),/end timestamp/);
  }
 });
+
+test('passive reconciliation preserves the original receipt date across later daily campaigns',async t=>{
+ const f=await fixture();t.after(f.close);
+ const {reconcileApplications}=await import('../src/applications.js');
+ const old='2026-01-02T12:15:00.000Z',later='2026-01-03T10:00:00.000Z';
+ await f.store.write('application-ledger.json',[{...attempt,receipt:{...attempt.receipt,verifiedAt:later}}]);
+ await f.store.write('history.json',[
+  {receiptId:attempt.id,status:'submitted',posting:'https://example.org/other',submittedAt:'2026-01-01T00:00:00Z'},
+  {receiptId:attempt.id,status:'submitted',posting:attempt.url,submittedAt:old},
+ ]);
+ await f.store.write('campaign.json',{enabled:true,targetConfirmed:15,since:'2026-01-03T00:00:00Z'});
+ const reconcile=()=>reconcileApplications({home:f.home,adapter:{},now:()=>new Date(later)});
+ await reconcile();
+ assert.equal((await f.store.read('application-ledger.json'))[0].submittedAt,old);
+ assert.equal((await campaignProgress(f)).confirmed,0);
+ const after=await f.store.read('application-ledger.json');await reconcile();
+ assert.deepEqual(await f.store.read('application-ledger.json'),after);
+});

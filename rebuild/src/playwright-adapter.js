@@ -1,4 +1,6 @@
+import {inspectAshbyGroups} from './ashby-form-groups.js';
 import {enrichGreenhouseFields} from './greenhouse-public-form.js';
+import {mongoEmbedRoute,verifyMongoForm} from './greenhouse-embed.js';
 import path from 'node:path';
 import {mkdir,chmod,readFile} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
@@ -36,13 +38,20 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
  }
  async inspect(job,{tabId}={}){
   if(!supportedPosting(job.url))throw Error('Unsupported employer host');
+  const embed=mongoEmbedRoute(job.url);
+  const rules=JSON.parse(await readFile(path.join(this.home,'search.json'),'utf8').catch(()=> '{}'));
+  const loadEvidence=()=>this.evidenceLoader(job,undefined,{includeQuestions:true,allowAnnualBaseAssumption:rules.allowAnnualBaseAssumption===true});
+  const embeddedEvidence=embed?await loadEvidence():null;
+  if(embed && (embeddedEvidence?.applicationUrl!==embed.url || embeddedEvidence.posting!==job.url ||
+       embeddedEvidence.title!==job.title || !embeddedEvidence.description))throw Error('Employer embed source binding is unverified');
   // Native page identities survive a worker restart through their posting URL.
   const remembered=this.nativeTabs.byId.get(tabId);
   const existing=remembered&&!remembered.page.isClosed()?remembered:this.nativeTabs.find(job.url)?this.nativeTabs.wrap(this.nativeTabs.find(job.url)):null;
   if(tabId&&!existing)throw Error('Preserved application page unavailable; no new form was opened');
   const tab=existing||await this.nativeTabs.new();
-  if(!existing)await tab.goto(job.url);
-  await tab.page.locator('h1').first().waitFor({state:'visible'});
+  if(!existing)await tab.goto(embed?.url||job.url);
+  await tab.page.locator(embed?'form#application-form':'h1').first().waitFor({state:'visible'});
+  if(embed)await verifyMongoForm(tab.page,job);
   const applicationText=await tab.page.locator('body').innerText();let overview=applicationText;
   if(new URL(job.url).hostname==='jobs.ashbyhq.com'){
    const application=tab.page.getByRole('tab',{name:'Application',exact:true});
@@ -56,12 +65,17 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
    }
   }
   const inspection=await super.inspect(job,{tabId:tab.id});
+  if(embed){
+   inspection.titleVerified=true;
+   overview=embeddedEvidence.description;
+   inspection.description=overview;
+   inspection.location=embeddedEvidence.location;
+  }
   if(new URL(job.url).hostname==='jobs.ashbyhq.com')inspection.description=overview;
   try{
-   const rules=JSON.parse(await readFile(path.join(this.home,'search.json'),'utf8').catch(()=> '{}'));
-   const evidence=await this.evidenceLoader(job,undefined,{includeQuestions:true,allowAnnualBaseAssumption:rules.allowAnnualBaseAssumption===true}),norm=s=>String(s).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+   const evidence=embeddedEvidence||await loadEvidence(),norm=s=>String(s).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
    if(evidence&&norm(evidence.title)===norm(job.title)&&evidence.posting===job.url){
-    if (['boards.greenhouse.io','job-boards.greenhouse.io'].includes(new URL(job.url).hostname)) enrichGreenhouseFields(inspection.form.fields,evidence.publicForm);
+    if (embed||['boards.greenhouse.io','job-boards.greenhouse.io'].includes(new URL(job.url).hostname)) enrichGreenhouseFields(inspection.form.fields,evidence.publicForm);
     inspection.compensation=evidence.compensation;inspection.publicEvidence={posting:job.url,sourceUrl:evidence.sourceUrl,checkedAt:new Date().toISOString()};
     if(evidence.location&&nationwideUSRemote(inspection.location)&&!nationwideUSRemote(evidence.location))inspection.location=evidence.location;
     const listingText=applicationText+'\n'+overview;
@@ -72,14 +86,7 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
    }
   }catch{/* Missing public evidence remains a hold, never a guessed salary. */}
   if(requiresLocalResidence(overview)||/Location Type\s*(?:Hybrid|On.?site)/i.test(applicationText+'\n'+overview))inspection.location='Location restrictions require review';
-  const groups=await tab.page.evaluate(()=>[...document.querySelectorAll('.ashby-application-form-field-entry[data-field-path]')].filter(e=>e.getClientRects().length).flatMap(e=>{
-   const buttons=[...e.querySelectorAll('button[aria-pressed]')].filter(b=>b.getClientRects().length),label=e.querySelector('label');
-   if(!label)return [];
-   if(!buttons.length){const combo=e.querySelector('button[role="combobox"],input[role="combobox"]');return combo?[{id:e.getAttribute('data-field-path'),selector:'[data-field-path='+JSON.stringify(e.getAttribute('data-field-path'))+'] '+combo.tagName.toLowerCase()+'[role="combobox"]',label:label.innerText.trim(),type:'select',required:/required/i.test(label.className)||combo.getAttribute('aria-required')==='true',value:combo.tagName==='INPUT'?combo.value:/^select/i.test(combo.innerText.trim())?'':combo.innerText.trim(),options:[]}]:[];}
-   return [{id:e.getAttribute('data-field-path'),selector:'[data-field-path='+JSON.stringify(e.getAttribute('data-field-path'))+']',label:label.innerText.trim(),type:'button-choice',required:/required/i.test(label.className)||label.getAttribute('aria-required')==='true',value:buttons.find(b=>b.getAttribute('aria-pressed')==='true')?.innerText.trim()||'',options:buttons.map(b=>b.innerText.trim())}];
-  }));
-  const radioGroups=await tab.page.evaluate(()=>[...document.querySelectorAll('fieldset.ashby-application-form-input-radio-group')].filter(e=>e.getClientRects().length).flatMap(e=>{const label=e.querySelector('label.ashby-application-form-question-title'),radios=[...e.querySelectorAll('input[type="radio"]')];if(!label?.htmlFor||!radios.length)return [];const text=r=>[...(r.labels||[])].map(l=>l.innerText.trim()).join(' ');return [{id:label.htmlFor,selector:'fieldset.ashby-application-form-input-radio-group:has(> label[for='+JSON.stringify(label.htmlFor)+'])',label:label.innerText.trim(),type:'radio-choice',required:/required/i.test(label.className),value:radios.find(r=>r.checked)?text(radios.find(r=>r.checked)):'',options:radios.map(text),controlIds:radios.map(r=>r.id)}]}));
-  groups.push(...radioGroups);
+  const groups=await tab.page.evaluate(inspectAshbyGroups);
   const fieldsetCombos=await tab.page.evaluate(()=>[...document.querySelectorAll('fieldset')].filter(e=>e.getClientRects().length&&!e.matches('.ashby-application-form-input-radio-group')).flatMap(e=>{const label=e.querySelector('label.ashby-application-form-question-title'),control=e.querySelector('input[role="combobox"],button[role="combobox"]');return label?.htmlFor&&control?[{id:label.htmlFor,selector:'fieldset:has(> label[for='+JSON.stringify(label.htmlFor)+']) [role="combobox"]',label:label.innerText.trim(),type:'select',required:/required/i.test(label.className),value:control.tagName==='INPUT'?control.value:/^select/i.test(control.innerText.trim())?'':control.innerText.trim(),options:[]}]:[]}));
   groups.push(...fieldsetCombos);
   inspection.form.fields=inspection.form.fields.filter(f=>!groups.some(g=>g.id===f.id||g.type==='select'&&f.type==='select'&&g.label===f.label||g.controlIds?.includes(f.id)));inspection.form.fields.push(...groups);
@@ -117,11 +124,12 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
  async fill(inspection,actions,resume){
   const tab=inspection.tab;
   await tab.page.bringToFront();
-  const checkDestination=()=>{
+  const checkDestination=async()=>{
    if(!samePosting(tab.page.url(),inspection.job.url))throw Error('Application destination changed');
+   await verifyMongoForm(tab.page,inspection.job);
   };
   for(const {field,value} of actions){
-   checkDestination();
+   await checkDestination();
    this.lastControl=field.label;
    if(field.type==='select' && field.committedChoices>1)throw Error('Multiple existing selections require review');
    if((field.type!=='select' || field.committedChoices===1) && field.value && sameAnswer(field,field.value,value))continue;
@@ -149,7 +157,7 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
    }else if(['checkbox','manual','radio'].includes(field.type))throw Error('Manual control requires applicant review');
    else await control.fill(value);
   }
-  checkDestination();
+  await checkDestination();
   this.lastControl='Resume upload';
   if(!inspection.form.resume.attached){
    const input=this.locator(tab,inspection.form.resume);
@@ -162,6 +170,7 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
  }
  async submit(inspection){
   const page=inspection.tab.page;await page.bringToFront();
+  await verifyMongoForm(page,inspection.job);
   if(!samePosting(page.url(),inspection.job.url))throw Error('Application destination changed');
   const events=[];this.submissionEvidence={at:new Date().toISOString(),jobId:inspection.job.id,events};
   const record=(request,status)=>{try{const url=new URL(request.url());if(events.length<40&&['POST','PUT'].includes(request.method()))events.push({origin:url.origin,path:url.pathname,method:request.method(),status});}catch{}};

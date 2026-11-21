@@ -276,3 +276,57 @@ test('Greenhouse decisions continue the correct forms through Chrome, scope reus
     await browser?.close();await server?.close();await rm(home,{recursive:true,force:true});
   }
 });
+
+test('Ashby native button and radio answers render as exact choices and survive a fresh inspection',testOptions,async t=>{
+  const {chromium}=await import('playwright');
+  const {inspectAshbyGroups}=await import('../src/ashby-form-groups.js');
+  const {PlaywrightApplicationAdapter}=await import('../src/playwright-adapter.js');
+  const {observeGreenhouseQuestions,readGreenhouseAnswers,greenhouseAnswerFor}=await import('../src/greenhouse-inbox.js');
+  const home=await mkdtemp(path.join(os.tmpdir(),'mosaic-ashby-inbox-'));
+  t.after(()=>rm(home,{recursive:true,force:true}));
+  const store=new ApplicationStore(home);
+  await seedWorkspace(home,store);
+  const url='https://jobs.ashbyhq.com/test-board/12345678-1234-1234-1234-123456789012';
+  const job={id:identity({url}),url,title:'Test engineering role',company:'Example',status:'new',listingState:'listed'};
+  await store.write('jobs.json',[job]);
+  const profileSha256=digest(await store.read('application-profile.json'));
+  const server=await startServer(home);
+  let browser;
+  try{
+    browser=await chromium.launch({headless:true,channel:process.env.MOSAIC_TEST_CHANNEL||undefined,chromiumSandbox:true});
+    const page=await browser.newPage();
+    const formPage=await browser.newPage();
+    await formPage.route('**/*', route => route.fulfill({contentType:'text/html',body:`
+      <div class="ashby-application-form-field-entry" data-field-path="travel">
+        <label class="required">Can you travel quarterly?</label><p>At a customer location.</p>
+        <button aria-pressed="false" onclick="this.setAttribute('aria-pressed','true')">Yes</button><button aria-pressed="false">No</button></div>
+      <fieldset class="ashby-application-form-input-radio-group"><label class="ashby-application-form-question-title required" for="tenure">Engineering tenure?</label>
+        <input type="radio" id="first"><label for="first">0–5 years</label>
+        <input type="radio" id="second"><label for="second">6+ years</label></fieldset>
+      <div class="ashby-application-form-field-entry" data-field-path="terms"><label class="required">Please select</label>
+        <p>This is consent to the processing of personal information.</p><button aria-pressed="false">Yes</button><button aria-pressed="false">No</button></div>`}));
+    await formPage.goto(url+'/application');
+    const fields=await formPage.evaluate(inspectAshbyGroups);
+    assert.deepEqual(fields.map(f=>f.type),['button-choice','button-choice','radio-choice']);
+    await observeGreenhouseQuestions({store,job,form:{fields},missing:fields.map(f=>f.label),profileSha256,channel:'manual'});
+    await page.goto(server.base);
+    await page.getByRole('group',{name:'Can you travel quarterly?'}).waitFor();
+    for(const [label,answer] of [['Can you travel quarterly?','Yes'],['Engineering tenure?','6+ years']]){
+      const group=page.getByRole('group',{name:label,exact:true}),choice=group.getByRole('combobox',{name:'Your answer'});
+      await choice.selectOption({label:answer});
+      const result=page.waitForResponse(r=>r.url().endsWith('/api/inbox/answer'));
+      await group.getByRole('button',{name:'Save answer and continue'}).click();
+      assert.equal((await result).status(),200);
+    }
+    assert.equal(await page.getByRole('group',{name:'Please select'}).count(),0);
+    const state=await readGreenhouseAnswers(store),fresh=await formPage.evaluate(inspectAshbyGroups);
+    const values=fresh.map(field=>greenhouseAnswerFor(state,{job,field,form:{fields:fresh},profileSha256}));
+    assert.deepEqual(values,['Yes',undefined,'6+ years']);
+    const adapter=new PlaywrightApplicationAdapter(formPage.context(),{home});
+    const inspection={tab:adapter.nativeTabs.wrap(formPage),job,form:{fields:fresh,resume:{attached:true,label:'Test résumé'}}};
+    const actions=fresh.flatMap((field,i)=>values[i]?[{field,value:values[i]}]:[]);
+    await adapter.fill(inspection,actions,path.join(home,'approved.pdf'));
+    assert.deepEqual((await formPage.evaluate(inspectAshbyGroups)).map(field=>field.value),['Yes','','6+ years']);
+    assert.deepEqual(state.permissions||[],[]);
+  }finally{await browser?.close();await server.close();}
+});
