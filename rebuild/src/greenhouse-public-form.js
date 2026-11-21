@@ -39,6 +39,9 @@ export function enrichGreenhouseFields(fields, publicForm) {
     if (matches.length === 1 && fields.filter(input => input.id === field.id).length === 1) {
       const published = matches[0];
       if (field.type === 'select' && !field.options?.length) field.options = [...published.options];
+      if (field.legacyDescription !== undefined && published.description && text(field.legacyDescription) !== published.description) {
+        field.legacyDescription = [field.legacyDescription, published.description].filter(Boolean).join(' ');
+      }
       if (published.description && text(field.description) !== published.description) {
         field.description = [field.description, published.description].filter(Boolean).join(' ');
       }

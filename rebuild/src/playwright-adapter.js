@@ -84,8 +84,11 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   for(const field of inspection.form.fields){
    if(inspection.location==='Remote, United States')field.countryContext='US';
    if(field.id&&!field.selector){const control=this.locator(tab,field);if(await control.count()===1){
-    const details=await control.evaluate(e=>{const entry=e.closest('.ashby-application-form-field-entry[data-field-path]'),label=entry?.querySelector('.ashby-application-form-question-title,label');const selected=e.closest('[class*="select__control"]')?.querySelectorAll('[class*="multi-value__label"], [class*="multiValueLabel"]');return {required:!!label&&/required/i.test(label.className),selected:Array.from(selected||[],node=>node.textContent.trim()).join(', ')}});
-    field.required=field.required||details.required;if(!field.value&&details.selected)field.value=details.selected;
+    const required=await control.evaluate(e=>{
+     const entry=e.closest('.ashby-application-form-field-entry[data-field-path]');
+     return /required/i.test(entry?.querySelector('.ashby-application-form-question-title,label')?.className||'');
+    });
+    field.required=field.required||required;
     if(field.type==='checkbox')field.value=String(await control.isChecked());
    }}
   }
@@ -118,7 +121,8 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   for(const {field,value} of actions){
    checkDestination();
    this.lastControl=field.label;
-   if(field.type!=='select'&&field.value&&sameAnswer(field,field.value,value))continue;
+   if(field.type==='select' && field.committedChoices>1)throw Error('Multiple existing selections require review');
+   if((field.type!=='select' || field.committedChoices===1) && field.value && sameAnswer(field,field.value,value))continue;
    const control=this.locator(tab,field);
    if(field.type==='radio-choice'){
     const choice=optionForAnswer(field,value,field.options||[]);if(!choice)throw Error('No radio option matches the verified applicant answer');await control.getByRole('radio',{name:choice,exact:true}).check();

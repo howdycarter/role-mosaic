@@ -4,7 +4,7 @@ import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { digest } from './applications.js';
-import {cleanField, permissionProposal} from './posting-permission.js';
+import {cleanField, matchesPermissionFields, permissionProposal, requestIdentity} from './posting-permission.js';
 
 const filename = 'greenhouse-inbox.json';
 const emptyState = () => ({ version: 1, observations: [], grants: [] });
@@ -64,8 +64,9 @@ function question(field, form, posting) {
   return { key, label, type: field.type, options, scopes: posting.postingOnly ? ['posting'] : allowed, ...(help ? { help } : {}) };
 }
 
-function formStamp(job, form) {
-  return digest([job.title, form.fields.map(f => [f.id || '', f.type, normalize(f.label), normalize(f.description || f.helpText),
+export function formStamp(job, form, {legacyHelp=false}={}) {
+  return digest([job.title, form.fields.map(f => [f.id || '', f.type, normalize(f.label),
+    normalize((legacyHelp ? f.legacyDescription ?? f.description : f.description) || f.helpText),
     !!f.required, Array.isArray(f.options) ? f.options : [], ...(f.policyLinks?.length ? [f.policyLinks] : [])])]);
 }
 
@@ -154,13 +155,56 @@ export function greenhouseAnswerFor(state, { job, field, form, profileSha256 }) 
   return grantFor(state, { ...posting, profileSha256, stamp: formStamp(job, form) }, q)?.answer;
 }
 
-// A decision is usable only on the same employer, posting, form revision and profile.
+function allowedForPosting(state,{job,profileSha256},posting) {
+  if(!posting || posting.confirmation || !state.permissions?.length ||
+     state.permissions.some(p=>p.postingKey===posting.key && p.decision==='skip'))return [];
+  return state.permissions.filter(p=>p.jobId===job.id && p.postingKey===posting.key &&
+    p.profileSha256===profileSha256 && p.decision==='allow' && p.title===job.title &&
+    Array.isArray(p.fields) && requestIdentity(job,posting,profileSha256,p.fields)===p.requestId);
+}
+
 export function approvedPostingPermission(state,{job,form,profileSha256}) {
-  const posting = greenhousePosting(job.url);
-  if (!posting || posting.confirmation || !state.permissions?.length) return null;
-  const stamp = formStamp(job,form);
-  return state.permissions.find(p=>p.jobId===job.id && p.postingKey===posting.key && p.stamp===stamp &&
-    p.profileSha256===profileSha256 && p.decision==='allow') || null;
+  const posting=greenhousePosting(job.url);
+  const grants=allowedForPosting(state,{job,profileSha256},posting);
+  if(!grants.length)return null;
+  const stamp=formStamp(job,form);
+  for(const permission of grants.slice().reverse()){
+    if(permission.binding) {
+      if(permission.binding.sourceStamp!==permission.stamp || permission.binding.stableStamp!==stamp)continue;
+      const current={...permission,fields:permission.binding.fields};
+      if(requestIdentity(job,posting,profileSha256,current.fields)!==permission.binding.stableRequestId)continue;
+      if(matchesPermissionFields(current,form))return current;
+    }else if(permission.stamp===stamp && matchesPermissionFields(permission,form))return permission;
+  }
+  return null;
+}
+
+// Transfer a legacy form revision only from one inspection that reproduces its
+// original hash, including the formerly captured transient descriptions. Never
+// strip strings such as "Select..." from a saved employer policy.
+export async function bindObservedPostingPermission({store,job,form,profileSha256}) {
+  return withInboxLock(store,async()=>{
+    if(await activeProfileHash(store)!==profileSha256)return null;
+    const state=await readGreenhouseAnswers(store),posting=greenhousePosting(job.url);
+    const inputs={job,form,profileSha256},current=approvedPostingPermission(state,inputs);
+    if(current)return current;
+    const legacyStamp=formStamp(job,form,{legacyHelp:true});
+    const previous=allowedForPosting(state,inputs,posting).find(p=>!p.binding && p.stamp===legacyStamp &&
+      matchesPermissionFields(p,form,{legacyHelp:true,requireUnfilled:true}));
+    if(!previous)return null;
+    const proposal=await proposedPermission(store,job,form,previous.fields.map(f=>f.label),posting);
+    if(!proposal || !sameAuthorizedAnswers(previous.fields,proposal.fields))return null;
+    previous.binding={sourceStamp:legacyStamp,stableStamp:formStamp(job,form),stableRequestId:proposal.id,
+      fields:proposal.fields,verifiedAt:new Date().toISOString()};
+    await store.write(filename,state);
+    return approvedPostingPermission(state,inputs);
+  });
+}
+
+function sameAuthorizedAnswers(before,after) {
+  const material=fields=>fields.map(({id,label,type,answer,kind,links,options})=>
+    [id,label,type,answer,kind||'',links,options]);
+  return digest(material(before))===digest(material(after));
 }
 
 async function proposedPermission(store,job,form,missing,posting) {

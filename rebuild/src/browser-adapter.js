@@ -35,20 +35,32 @@ export class CodexBrowserAdapter {
     const labels=[...(e.labels||[])].map(l=>l.textContent.trim()).filter(Boolean);
     const aria=(e.getAttribute('aria-labelledby')||'').split(/\s+/).map(id=>document.getElementById(id)?.textContent?.trim()||'').filter(Boolean).join(' ');
     const parent=e.closest('[class*="field"], [class*="question"]');
-    const selected=e.closest('[class*="select__control"]')?.querySelector('[class*="single-value"], [class*="singleValue"]');
+    const selectControl=e.getAttribute('role')==='combobox' ? e.closest('[class*="select__control"]') : null;
+    const selected=selectControl?.querySelector('[class*="single-value"], [class*="singleValue"]');
+    const chips=selectControl?.querySelectorAll('[class*="multi-value__label"], [class*="multiValueLabel"]');
+    const selectedValues=selected ? [selected.textContent.trim()] : Array.from(chips||[],node=>node.textContent.trim());
     const countryFlag=selected?.querySelector('[class*="iti__flag"]')?.className.match(/\biti__([a-z]{2})\b/)?.[1];
     const label=(labels.join(' ')||e.getAttribute('aria-label')||aria||parent?.querySelector('label')?.textContent||'').replace(/\s+/g,' ').trim();
-    let description='',policyLinks=[];
+    let description='',legacyDescription='',policyLinks=[];
     if(['boards.greenhouse.io','job-boards.greenhouse.io'].includes(location.hostname)) {
-     const descriptions=(e.getAttribute('aria-describedby')||'').split(/\s+/).filter(Boolean)
-      .map(id=>document.getElementById(id)?.textContent?.trim()).filter(Boolean);
+     const described=(e.getAttribute('aria-describedby')||'').split(/\s+/).filter(Boolean)
+      .map(id=>document.getElementById(id)).filter(Boolean);
      const help=parent?.querySelector('.field-description,.description,[data-testid="field-description"]')?.textContent?.trim();
-     if(help)descriptions.push(help);
-     description=[...new Set(descriptions)].join(' ');
-     const context=[...(e.labels||[]),parent,...(e.getAttribute('aria-describedby')||'').split(/\s+/).map(id=>document.getElementById(id))].filter(Boolean);
+     const helpText=nodes=>[...new Set([...nodes.map(node=>node.textContent.trim()),help].filter(Boolean))].join(' ');
+     // React Select references its placeholder, committed choice or keyboard announcement as the widget state changes.
+     // Genuine employer instructions and links remain part of the form revision.
+     const employerHelp=described.filter(node=>{
+      if(!selectControl?.parentElement?.contains(node) || !/^react-select-.+-(?:placeholder|live-region|single-value)$/.test(node.id) ||
+         node.querySelector('a[href]'))return true;
+      if(node.id.endsWith('-placeholder'))return !/^Select(?:\s+(?:an? )?(?:option|answer))?(?:\.{3}|…)?$/i.test(node.textContent.trim());
+      return !(node.id.endsWith('-live-region') || node===selected);
+     });
+     description=helpText(employerHelp);
+     legacyDescription=helpText(described);
+     const context=[...(e.labels||[]),parent,...described].filter(Boolean);
      policyLinks=[...new Set(context.flatMap(node=>[...node.querySelectorAll('a[href]')].map(a=>a.href)).filter(h=>h.startsWith('https://')))].sort();
     }
-    return {id:e.id,label,...(description?{description}:{}),...(policyLinks.length?{policyLinks}:{}),triggerSelector:e.type==='file'&&e.id&&e.parentElement.querySelector('button')?e.parentElement.tagName.toLowerCase()+':has(> input#'+CSS.escape(e.id)+') > button':null,type:e.type==='file'?'file':e.tagName==='SELECT'||e.getAttribute('role')==='combobox'?'select':e.type||'text',required:e.required||e.getAttribute('aria-required')==='true'||/\*/.test(label),value:e.type==='file'?'':e.id==='country'&&countryFlag==='us'?'United States':e.value||selected?.textContent?.trim()||'',options:e.tagName==='SELECT'?[...e.options].map(o=>o.textContent.trim()):[]};
+    return {id:e.id,label,...(description?{description}:{}),...(legacyDescription!==description?{legacyDescription}:{}),...(selectControl?{committedChoices:selectedValues.length}:{}),...(policyLinks.length?{policyLinks}:{}),triggerSelector:e.type==='file'&&e.id&&e.parentElement.querySelector('button')?e.parentElement.tagName.toLowerCase()+':has(> input#'+CSS.escape(e.id)+') > button':null,type:e.type==='file'?'file':e.tagName==='SELECT'||e.getAttribute('role')==='combobox'?'select':e.type||'text',required:e.required||e.getAttribute('aria-required')==='true'||/\*/.test(label),value:e.type==='file'?'':e.id==='country'&&countryFlag==='us'?'United States':selectControl?selectedValues.join(', '):e.value||'',options:e.tagName==='SELECT'?[...e.options].map(o=>o.textContent.trim()):[]};
    });
    const buttons=[...document.querySelectorAll('button,input[type="submit"]')].filter(e=>e.getClientRects().length>0).map(e=>({label:(e.innerText||e.value||e.getAttribute('aria-label')||'').trim(),id:e.id}));
    const heading=[...document.querySelectorAll('h1,h2')].map(e=>e.textContent.trim());

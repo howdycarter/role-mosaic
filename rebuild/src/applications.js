@@ -8,7 +8,7 @@ import {loadEvidence,roleTrack,qualityDigest,jobDigest,selectTrackResume,tracks}
 import {evidenceQuestionScope,openEvidenceQuestions} from './evidence-answers.js';
 import {reviewWithEvidence} from './evidence-review.js';
 import {mixedCompensation} from './sources.js';
-import {greenhousePosting, applicationPosting, approvedPostingPermission, greenhouseAnswerFor, observeGreenhouseQuestions, readGreenhouseAnswers} from './greenhouse-inbox.js';
+import {greenhousePosting, applicationPosting, approvedPostingPermission, bindObservedPostingPermission, greenhouseAnswerFor, observeGreenhouseQuestions, readGreenhouseAnswers} from './greenhouse-inbox.js';
 export { optionForAnswer, sameAnswer } from './application-values.js';
 
 export const digest = value => createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');
@@ -304,7 +304,11 @@ async function applicationFillPlan(store, job, form, ctx, adapter) {
  if(adapter.transport==='playwright' && applicationPosting(job.url)){
   scope.job=job;
   const state=await readGreenhouseAnswers(store);
-  permission=approvedPostingPermission(state,{job,form,profileSha256:ctx.profileSha256});
+  const observed={job,form,profileSha256:ctx.profileSha256};
+  permission=approvedPostingPermission(state,observed);
+  if(!permission && state.permissions?.some(p=>p.jobId===job.id && p.profileSha256===ctx.profileSha256 && p.decision==='allow' && !p.binding)){
+   permission=await bindObservedPostingPermission({store,...observed});
+  }
   scope.inboxAnswer=field=>greenhouseAnswerFor(state,{job,field,form,profileSha256:ctx.profileSha256});
  }
  if(!permission)return fillPlan(form,ctx.profile,scope);
@@ -397,7 +401,10 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
    if(!standingAuthorizationMatches(ctx.policy,scope,adapter))throw Error('Fresh held draft requires current native standing authorization');
    const restart=job&&await restartException(store,held.restartAuthorizationId,job,ctx,ledger,adapter,now(),held.id);
    if(!job||job.listingState==='unlisted'||held.restartAuthorizationId&&!restart||['applied','dismissed','rejected'].includes(job.status)||!restart&&duplicate(job,ctx.history,ledger.filter(a=>a.id!==held.id),ctx.reapplicationReviews))throw Error('Held draft is no longer eligible');
-   const inspection=await adapter.inspect(job),fresh=await packetFromInspection(store,job,inspection,ctx,now(),adapter);
+   const original=adapter.preservedPage?.(held,{exact:true});
+   if(original && held.browserEvidence?.resumeUpload?.sha256===ctx.resumeSha256)adapter.restoreEvidence?.(job.id,held.browserEvidence);
+   const inspection=original ? await adapter.inspect(job,{tabId:held.tabId}) : await adapter.inspect(job);
+   const fresh=await packetFromInspection(store,job,inspection,ctx,now(),adapter);
    const freshQuality=await qualityGate(store,ctx,job,undefined,adapter);if(!freshQuality.ok)throw Error('Held draft needs evidence and track résumé review');if(freshQuality.qualitySha256){fresh.qualitySha256=freshQuality.qualitySha256;fresh.digest=digest(Object.fromEntries(Object.entries(fresh).filter(([k])=>k!=='digest')));}
    if(restart){fresh.restartAuthorizationId=restart.id;fresh.digest=digest(Object.fromEntries(Object.entries(fresh).filter(([k])=>k!=='digest')));}
    (held.draftRefreshes||=[]).push({at:now().toISOString(),previousPacketDigest:held.packetDigest,previousTabId:held.tabId,packetDigest:fresh.digest,grantId:ctx.policy.standingAuthorization.id});
@@ -447,6 +454,7 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
       if(beforeFill.missing.length || beforeFill.inboxAnswerSha256!==packet.inboxAnswerSha256)throw Error('Inbox answers changed before fill');
      }
      attempt.browserEvidence=await adapter.fill(activeInspection,activeActions,ctx.connections.resume);await save();
+     adapter.lastControl='employer form readback';
      check=await adapter.verify(activeInspection,activeActions,ctx.connections.resume);
      if(check.ok||authorization.mode!=='search-rules'||check.reason!=='Posting or form structure changed'||pass===2)break;
      const fresh=await adapter.inspect(packet.job,{tabId:packet.tabId}),freshPlan=await applicationFillPlan(store,packet.job,fresh.form,ctx,adapter);
@@ -461,11 +469,13 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
     const currentAttempts=await store.read('application-ledger.json',[]),currentRestart=await restartException(store,packet.restartAuthorizationId,packet.job,current,currentAttempts,adapter,now(),attempt.id);
     if(current.resumeSha256!==packet.resumeSha256||current.profileSha256!==packet.profileSha256||current.searchSha256!==packet.searchSha256||!applicationAuthorization(current.policy,packet,adapter,await store.read('application-approvals.json',[]),now())||packet.restartAuthorizationId&&!currentRestart||!currentRestart&&duplicate(packet.job,current.history,currentAttempts.filter(a=>a.id!==attempt.id),current.reapplicationReviews))throw Error('Submission authorization or applicant state changed');
     if(packet.inboxAnswerSha256){
+     adapter.lastControl='employer permission recheck';
      const latest=await adapter.inspect(packet.job,{tabId:packet.tabId});
      const finalPlan=await applicationFillPlan(store,packet.job,latest.form,current,adapter);
      if(!latest.titleVerified || latest.closed || latest.login || latest.captcha || formDigest(latest.form)!==formDigest(activeInspection.form) ||
         finalPlan.missing.length || finalPlan.inboxAnswerSha256!==packet.inboxAnswerSha256)throw Error('Inbox answers or employer form changed before submission');
     }
+    adapter.lastControl='pre-submit checkpoint';
     attempt.verificationCheckpoint=await adapter.captureVerificationCheckpoint?.(activeInspection);
     // The application lock serializes other submissions. A slow form or resumed
     // tab can cross local midnight after the initial quota check.
