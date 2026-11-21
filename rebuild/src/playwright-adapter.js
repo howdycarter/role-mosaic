@@ -1,4 +1,5 @@
 import {inspectAshbyGroups} from './ashby-form-groups.js';
+import {attachMongoSurvey,observeMongoSurvey,fillVoluntarySurveyField} from './mongo-voluntary-survey.js';
 import {enrichGreenhouseFields} from './greenhouse-public-form.js';
 import {mongoEmbedRoute,verifyMongoForm} from './greenhouse-embed.js';
 import path from 'node:path';
@@ -52,6 +53,11 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   if(!existing)await tab.goto(embed?.url||job.url);
   await tab.page.locator(embed?'form#application-form':'h1').first().waitFor({state:'visible'});
   if(embed)await verifyMongoForm(tab.page,job);
+  if(embeddedEvidence?.survey) {
+   // Greenhouse renders the required consent client-side after the survey appears.
+   // Never prepare a survey-bearing form before its verified company consent is available.
+   await tab.page.locator('#'+embeddedEvidence.survey.consentId).waitFor({state:'attached',timeout:10000});
+  }
   const applicationText=await tab.page.locator('body').innerText();let overview=applicationText;
   if(new URL(job.url).hostname==='jobs.ashbyhq.com'){
    const application=tab.page.getByRole('tab',{name:'Application',exact:true});
@@ -114,6 +120,10 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   const normalized=s=>s.replace(/[*:]/g,'').replace(/\s+/g,' ').trim();
   for(const label of requiredLabels){const fields=inspection.form.fields.filter(f=>normalized(f.label)===normalized(label));if(fields.length===1)fields[0].required=true;else if(!fields.length&&normalized(label)!==normalized(inspection.form.resume?.label||''))inspection.form.fields.push({id:'',label:'Manual control: '+label,type:'manual',required:true,value:''});}
   for(const file of await tab.page.locator('input[type="file"][required]').all()){const id=await file.getAttribute('id');if(id!==inspection.form.resume?.id)inspection.form.fields.push({id:'',label:'Additional required file: '+(id||'unlabelled upload'),type:'manual',required:true,value:''});}
+  if(embeddedEvidence?.survey){
+   attachMongoSurvey(inspection.form,await tab.page.evaluate(observeMongoSurvey,embeddedEvidence.survey));
+   if(inspection.form.voluntarySurvey)inspection.surveyEvidence=embeddedEvidence.survey;
+  }
   return inspection;
  }
  locator(tab,field){
@@ -131,6 +141,11 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
   for(const {field,value} of actions){
    await checkDestination();
    this.lastControl=field.label;
+   if(field.surveyChoiceVerified){
+    await fillVoluntarySurveyField(tab.page,this.locator(tab,field),{published:inspection.surveyEvidence,
+     survey:inspection.form.voluntarySurvey,field,value});
+    continue;
+   }
    if(field.type==='select' && field.committedChoices>1)throw Error('Multiple existing selections require review');
    if((field.type!=='select' || field.committedChoices===1) && field.value && sameAnswer(field,field.value,value))continue;
    const control=this.locator(tab,field);

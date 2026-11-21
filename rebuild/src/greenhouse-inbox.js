@@ -4,7 +4,9 @@ import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { digest } from './applications.js';
+import {voluntarySurveyMatches,voluntarySurveyProposal} from './mongo-voluntary-survey.js';
 import { mongoEmbedRoute } from './greenhouse-embed.js';
+import {ashbyRecruitmentPermission, ashbyRecruitmentPermissionMatches} from './ashby-recruitment-privacy.js';
 import {cleanField, matchesPermissionFields, permissionProposal, requestIdentity} from './posting-permission.js';
 
 const filename = 'greenhouse-inbox.json';
@@ -77,7 +79,7 @@ function question(field, form, posting) {
 export function formStamp(job, form, {legacyHelp=false}={}) {
   return digest([job.title, form.fields.map(f => [f.id || '', f.type, normalize(f.label),
     normalize((legacyHelp ? f.legacyDescription ?? f.description : f.description) || f.helpText),
-    !!f.required, Array.isArray(f.options) ? f.options : [], ...(f.policyLinks?.length ? [f.policyLinks] : [])])]);
+    !!f.required, Array.isArray(f.options) ? f.options : [], ...(f.policyLinks?.length ? [f.policyLinks] : [])]), ...(form.voluntarySurvey ? [form.voluntarySurvey] : [])]);
 }
 
 function validValue(q, value) {
@@ -174,11 +176,19 @@ function allowedForPosting(state,{job,profileSha256},posting) {
 }
 
 export function approvedPostingPermission(state,{job,form,profileSha256}) {
-  const posting=greenhousePosting(job.url);
+  const posting=applicationPosting(job.url);
   const grants=allowedForPosting(state,{job,profileSha256},posting);
   if(!grants.length)return null;
   const stamp=formStamp(job,form);
   for(const permission of grants.slice().reverse()){
+    if(posting.postingOnly) {
+      if(permission.stamp===stamp && ashbyRecruitmentPermissionMatches({job,posting,form,permission}))return permission;
+      continue;
+    }
+    if(permission.fields.some(f=>f.kind==='survey-decline')) {
+      if(posting.board==='mongodb' && mongoEmbedRoute(job.url)?.key===posting.key && permission.stamp===stamp && voluntarySurveyMatches(permission,form))return permission;
+      continue;
+    }
     if(permission.binding) {
       if(permission.binding.sourceStamp!==permission.stamp || permission.binding.stableStamp!==stamp)continue;
       const current={...permission,fields:permission.binding.fields};
@@ -199,7 +209,7 @@ export async function bindObservedPostingPermission({store,job,form,profileSha25
     const inputs={job,form,profileSha256},current=approvedPostingPermission(state,inputs);
     if(current)return current;
     const legacyStamp=formStamp(job,form,{legacyHelp:true});
-    const previous=allowedForPosting(state,inputs,posting).find(p=>!p.binding && p.stamp===legacyStamp &&
+    const previous=allowedForPosting(state,inputs,posting).find(p=>!p.binding && !p.fields.some(f=>f.kind==='survey-decline') && p.stamp===legacyStamp &&
       matchesPermissionFields(p,form,{legacyHelp:true,requireUnfilled:true}));
     if(!previous)return null;
     const proposal=await proposedPermission(store,job,form,previous.fields.map(f=>f.label),posting);
@@ -218,15 +228,24 @@ function sameAuthorizedAnswers(before,after) {
 }
 
 async function proposedPermission(store,job,form,missing,posting) {
-  if (!form || posting.postingOnly || !missing.length) return null;
+  if (!form || !missing.length) return null;
   const profile=await store.read('application-profile.json',null);
-  if(!profile?.answers?.some(a=>a.verified && a.scopePostingKey && missing.some(label=>cleanField(label)===cleanField(a.question))))return null;
+  if (posting.postingOnly) return profile?.verified ? ashbyRecruitmentPermission({job,posting,form,missing,profileSha256:digest(profile)}) : null;
+  const survey=async()=>{
+    const candidate=voluntarySurveyProposal({job,posting,form,missing,profile});
+    if(!candidate)return null;
+    const previous=(await readGreenhouseAnswers(store)).permissions||[];
+    const changed=previous.some(p=>p.postingKey===posting.key && p.profileSha256===digest(profile) &&
+      (p.decision!=='allow' || p.requestId!==candidate.id || p.stamp!==formStamp(job,form)));
+    return changed?null:candidate;
+  };
+  if(!profile?.answers?.some(a=>a.verified && a.scopePostingKey && missing.some(label=>cleanField(label)===cleanField(a.question))))return survey();
   const ledger=await store.read('application-ledger.json',[]);
   const priorPostings=new Set(ledger.flatMap(row=>{
     const previous=greenhousePosting(row.url);
     return previous?.board===posting.board && previous.id!==posting.id ? ['greenhouse:'+previous.id] : [];
   }));
-  return permissionProposal({job,form,missing,profile,posting,priorPostings});
+  return permissionProposal({job,form,missing,profile,posting,priorPostings}) || survey();
 }
 
 export async function decidePostingPermission({store,id,jobId,revision,decision}) {
@@ -327,6 +346,7 @@ function summarize(state, observations) {
     if(decision?.decision==='skip')continue;
     let hasMissing = Boolean(o.proposal && !decision);
     if(hasMissing)permissions.push({id:o.proposal.id,jobId:o.jobId,company:o.company,title:o.title,url:o.url,revision:o.stamp,
+      ...(o.proposal.purpose ? {purpose:o.proposal.purpose} : {}),
       fields:o.proposal.fields.map(({label,answer,help,links})=>({label,answer,help,links}))});
     for (const q of o.questions) {
       if (grantFor(state, o, q)) continue;
@@ -353,8 +373,11 @@ export async function readGreenhouseInbox(store, { includeObserved = false } = {
   }));
   const observations = await liveObservations(store, state, profileSha256);
   const result = { ...summarize(state, observations), savedAnswers };
-  if (includeObserved) result.observed = new Map(observations.filter(o => o.channel === 'worker')
-    .map(o => [o.jobId, new Set([...o.questions,...(o.proposal?.fields||[])].map(q => q.label))]));
+  if (includeObserved) {
+    result.observed = new Map(observations.filter(o => o.channel === 'worker')
+      .map(o => [o.jobId, new Set([...o.questions,...(o.proposal?.fields||[])].map(q => q.label))]));
+    result.skippedKeys = new Set((state.permissions || []).filter(p => p.decision === 'skip').map(p => p.postingKey));
+  }
   return result;
 }
 

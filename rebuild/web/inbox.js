@@ -105,8 +105,12 @@
 
   function permissionCard(item) {
     const section=element('section'), group=element('fieldset');
+    const recruitmentNotice=item.purpose==='recruitment-privacy';
+    const voluntarySurvey=item.purpose==='decline-voluntary-survey';
     group.append(element('legend',item.company+' · '+item.title),
-      element('p','Use these previous answers and privacy choices for this application?'));
+      element('p',voluntarySurvey?'How would you like to handle this voluntary survey? You can share your own answers on the employer form, decline each question and allow the processing below, or skip this application. No choice is selected.':
+        recruitmentNotice?'Do you allow the collection, use and transfer described below for this application?':
+        'Use these previous answers and privacy choices for this application?'));
     const fields=element('dl');
     for(const field of item.fields){
       fields.append(element('dt',field.label),element('dd',field.answer==='true'?'Check the consent box':field.answer));
@@ -114,13 +118,17 @@
       for(const raw of field.links||[]){
         let url;try{url=new URL(raw);}catch{continue;}
         if(url.protocol!=='https:'||url.username||url.password)continue;
-        const link=element('a',url.hostname+url.pathname);link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';
+        const link=element('a',voluntarySurvey?url.href:url.hostname+url.pathname);link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';
         const line=element('dd');line.append(link);fields.append(line);
       }
     }
     group.append(fields);
     const actions=element('div');
-    for(const [decision,title] of [['allow','Authorize these answers for this application'],['skip','Skip this application']]){
+    if(voluntarySurvey) {
+      const custom=element('a','Choose my own answers on the employer form');
+      custom.href=item.url;custom.target='_blank';custom.rel='noopener noreferrer';actions.append(custom);
+    }
+    for(const [decision,title] of [['allow',voluntarySurvey?'Decline every survey question and authorize the consent shown':recruitmentNotice?'Allow this recruitment privacy acknowledgement':'Authorize these answers for this application'],['skip','Skip this application']]){
       const button=element('button',title);button.type='button';
       button.onclick=async()=>{
         group.disabled=true;

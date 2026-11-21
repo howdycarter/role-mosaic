@@ -94,3 +94,14 @@ test('applicant completes an evidence and specialization review in the dashboard
     assert.deepEqual(await store.read('application-ledger.json',[]),[]);assert.deepEqual(outbound,[]);
   } finally {await browser?.close();if(child.exitCode===null&&!child.signalCode){const exited=once(child,'exit');child.kill();await exited;}}
 });
+
+test('only a checkpointed pending email verification links to its original loopback dashboard',async t=>{
+  const store=await fixture(t);
+  const base={id:'original',url:posting.url,company:posting.company,title:posting.title,status:'submission_unknown',
+    verificationDashboardPort:4317,emailVerificationPending:true,verificationCheckpoint:{formDigest:'sample'}};
+  const cases=[base,{...base,id:'port',verificationDashboardPort:'https://example.org'},
+    {...base,id:'draft',status:'held'},{...base,id:'lost',verificationCheckpoint:null}];
+  await store.write('application-ledger.json',cases);
+  const {reviews}=await readDecisionInbox(store);
+  assert.deepEqual(reviews.filter(row=>row.verificationDashboardPort).map(r=>[r.attemptId,r.verificationDashboardPort]),[['original',4317]]);
+});

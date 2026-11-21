@@ -1,3 +1,4 @@
+import {publishedMongoSurvey} from './mongo-voluntary-survey.js';
 import {publicGreenhouseForm} from './greenhouse-public-form.js';
 import {mongoEmbedRoute,verifyMongoEmbed} from './greenhouse-embed.js';
 import {ashbyLocation,nationwideUSRemote,requiresLocalResidence} from './location.js';
@@ -137,7 +138,7 @@ export async function livePostingEvidence(job,fetcher=fetch,rules={}){
   if(!pay)pay=salaryFromText(j.content||'',{allowAnnualBaseAssumption:assumptionAllowed,location:j.location?.name});
   return {title:j.title,location:listingLocation(j.location?.name||'',j.content),compensation:pay,posting:job.url,sourceUrl,
    ...(embed?{applicationUrl:embed.url,description:htmlText(htmlText(j.content||''))}:{}),
-   ...(rules.includeQuestions?{publicForm:publicGreenhouseForm(j.questions)}:{})};
+   ...(rules.includeQuestions?{publicForm:publicGreenhouseForm(j.questions),...(embed?{survey:publishedMongoSurvey(j.demographic_questions)}:{})}:{})};
  }
  return null;
 }

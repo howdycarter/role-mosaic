@@ -35,7 +35,10 @@ function renderInboxReview(row, api, refresh) {
     });
   }
   if (row.attemptId) {
-    action(actions, 'View original attempt', async () => {
+    const originalPort=row.verificationDashboardPort;
+    if(Number.isInteger(originalPort) && originalPort>=1024 && originalPort<=65535 && String(originalPort)!==location.port){
+      link(actions,'Enter email code in original Mosaic window','http://127.0.0.1:'+originalPort+'/#attempt-'+encodeURIComponent(row.attemptId));
+    } else action(actions, 'View original attempt', async () => {
       await load();
       const target=document.getElementById('attempt-'+row.attemptId);
       if(!target)throw Error('Refresh the inbox to see the latest application state.');

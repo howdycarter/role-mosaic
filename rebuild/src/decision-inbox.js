@@ -2,7 +2,7 @@
 import { openEvidenceQuestions } from './evidence-answers.js';
 import { postingKey } from './applications.js';
 import { createHistoryLookup, historyMatch, reapplicationHistory } from './core.js';
-import { greenhousePosting, readGreenhouseInbox } from './greenhouse-inbox.js';
+import { applicationPosting, greenhousePosting, readGreenhouseInbox } from './greenhouse-inbox.js';
 import { confirmedReceipt } from './outcomes.js';
 
 const normalize = text => String(text ?? '').replace(/\s+/g, ' ').trim().replace(/\s*\*+$/, '').trim();
@@ -23,12 +23,15 @@ export async function readDecisionInbox(store) {
     readGreenhouseInbox(snapshot, { includeObserved: true }), snapshot.read('application-plan.json', {held:[]}),
     snapshot.read('application-ledger.json', []),
   ]);
-  const { observed, ...inbox } = greenhouse;
+  const { observed, skippedKeys, ...inbox } = greenhouse;
   const reviews = [];
   const confirmed = new Set(ledger.filter(confirmedReceipt).map(a => key(a.url)).filter(Boolean));
   for (const a of ledger) {
     if (!['held', 'submission_unknown'].includes(a.status) || confirmed.has(key(a.url))) continue;
     reviews.push({ kind: a.status === 'held' ? 'draft' : 'receipt', attemptId:a.id, company:a.company,
+      ...(a.status==='submission_unknown' && a.emailVerificationPending && a.verificationCheckpoint &&
+          Number.isInteger(a.verificationDashboardPort) && a.verificationDashboardPort>=1024 && a.verificationDashboardPort<=65535
+        ? {verificationDashboardPort:a.verificationDashboardPort} : {}),
       title:a.title, reason:a.reason || (a.status === 'held' ? 'Draft requires review' : 'Employer confirmation is pending') });
   }
   if (!plan.held?.length) return { ...inbox, reviews };
@@ -46,6 +49,7 @@ export async function readDecisionInbox(store) {
     if (hold.needsApplicantInput === false || ['Posting or form could not be inspected','Closed, sign-in required, or title mismatch'].includes(hold.reason)) continue;
     const job = inventory.get(hold.id);
     if (!job || !['new', 'saved'].includes(job.status || 'new') || job.listingState === 'unlisted') continue;
+    if (skippedKeys.has(applicationPosting(job.url)?.key)) continue;
     const posting = key(job.url);
     if (attemptedIds.has(job.id) || attemptedKeys.has(posting)) continue;
     if (historyFor(job) && (!reviewedPostings.has(posting) || historyMatch(job, reapplicationHistory(job, history, exceptions)))) continue;
