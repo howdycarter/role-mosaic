@@ -18,6 +18,17 @@ export function qualifiedUSRemote(label) {
   return /^(?:remote (?:in the )?(?:us|usa|united states)\b|(?:us|usa|united states) remote\b)/.test(words) && !nationwideUSRemote(label);
 }
 
+// Ashby renders separately configured hiring locations on a single line; commas
+// can be part of a single city label. Reconcile only a complete, exact set.
+export function matchesAshbyRemoteOptions(line, options) {
+  if (!Array.isArray(options) || options.length < 2 || !options.every(label => typeof label === 'string' && label.trim())) return false;
+  const displayed = line.split(';').map(label => label.trim().toLowerCase()).sort();
+  const expected = options.map(label => label.trim().toLowerCase()).sort();
+  if (displayed.length !== expected.length || !expected.some(nationwideUSRemote)) return false;
+  if (displayed.some(label => /\b(?:only|except|excluding|excluded|restrictions?|restricted|limited|within|must|require[ds]?|residents?|eligible|ineligible)\b/i.test(label))) return false;
+  return displayed.every((label, index) => label === expected[index]);
+}
+
 export function requiresLocalResidence(text) {
   const statements = String(text).split(/\r?\n|(?<=[.!?])\s+/);
   return statements.some(statement => {

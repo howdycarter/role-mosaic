@@ -6,7 +6,7 @@ import {CodexBrowserAdapter} from './browser-adapter.js';
 import {digest,samePosting,supportedPosting} from './applications.js';
 import {optionForAnswer,sameAnswer} from './application-values.js';
 import {livePostingEvidence} from './sources.js';
-import {nationwideUSRemote,qualifiedUSRemote,requiresLocalResidence} from './location.js';
+import {matchesAshbyRemoteOptions,nationwideUSRemote,qualifiedUSRemote,requiresLocalResidence} from './location.js';
 
 // A native transport: no Codex connection, browser extension, CDP attachment,
 // user-profile copying, stealth switches, remote debugging port or AI API.
@@ -64,7 +64,9 @@ export class PlaywrightApplicationAdapter extends CodexBrowserAdapter {
     if (['boards.greenhouse.io','job-boards.greenhouse.io'].includes(new URL(job.url).hostname)) enrichGreenhouseFields(inspection.form.fields,evidence.publicForm);
     inspection.compensation=evidence.compensation;inspection.publicEvidence={posting:job.url,sourceUrl:evidence.sourceUrl,checkedAt:new Date().toISOString()};
     if(evidence.location&&nationwideUSRemote(inspection.location)&&!nationwideUSRemote(evidence.location))inspection.location=evidence.location;
-    const listingText=applicationText+'\n'+overview,scoped=listingText.split(/\r?\n/).find(qualifiedUSRemote);
+    const listingText=applicationText+'\n'+overview;
+    const ashbyRemote=new URL(job.url).hostname==='jobs.ashbyhq.com' && evidence.location==='Remote, United States';
+    const scoped=listingText.split(/\r?\n/).find(line=>qualifiedUSRemote(line) && !(ashbyRemote && matchesAshbyRemoteOptions(line,evidence.locationOptions)));
     if(scoped)inspection.location=scoped;
     else if(evidence.location==='Remote, United States'&&!/Location Type\s*(?:Hybrid|On.?site)|\bexcept\b|\bexcluding\b|only (?:candidates|residents)|not eligible|must (?:reside|live|relocate)|\brequired.*(?:onsite|on-site|office)\b/i.test(listingText))inspection.location=evidence.location;
    }

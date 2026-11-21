@@ -69,3 +69,27 @@ test('opt-in conventional annual salary assumption never overrides another curre
  assert.equal(salaryFromText('Base salary $20,000 - $25,000 per month',rules),null);
  assert.equal(salaryFromText('Base salary $200,000 - $225,000',{...rules,location:'Canada'}),null);
 });
+
+test('full-time US salary bands with equity listed separately retain their period assumption at live preflight',async()=>{
+ const url='https://job-boards.greenhouse.io/example/jobs/123',rules={allowAnnualBaseAssumption:true};
+ const band='Salary Band in U.S. (USD): $168,912-$253,368 + meaningful early-stage equity + benefits';
+ const base='Competitive base salary, meaningful equity (U.S. employees), and a 401(k) program.';
+ const fullTime='Full-time U.S. employees are eligible for these benefits';
+ const payload={id:123,title:'Staff Forward Deployed Engineer',location:{name:'United States - Remote'},pay_input_ranges:[],metadata:null};
+ const inspect=async(lines,options=rules)=>{
+  const content=lines.map(line=>'&lt;p&gt;'+line+'&lt;/p&gt;').join('');
+  return (await livePostingEvidence({url},async()=>Response.json({...payload,content}),options)).compensation;
+ };
+ const good=[band,base,fullTime];
+ const pay=await inspect(good);
+ assert.equal(pay.min,168912);assert.equal(pay.max,253368);assert.equal(pay.periodAssumed,true);
+ assert.match(pay.evidence,/equity \+ benefits/);
+ for(const lines of [[band,base],[band,fullTime],[...good,band],[...good,'This is a part-time position.'],
+  [band+' (monthly)',base,fullTime],[band.replace(' + meaningful',' OTE + meaningful'),base,fullTime],
+  [band.replace('(USD)','(CAD)'),base,fullTime],[band.replace('$253,368','$125,000'),base,fullTime]]){
+  assert.equal(await inspect(lines),null);
+ }
+ assert.equal(await inspect(good,{}),null);
+ payload.location.name='Remote - Canada';
+ assert.equal(await inspect(good),null);
+});

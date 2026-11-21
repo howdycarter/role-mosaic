@@ -17,11 +17,28 @@ export function ashbySalary(compensation){
 }
 const usLocation=location=>(/\b(?:United States|USA|US)\b/i.test(location||'')||/\b[A-Z][a-z]+(?: [A-Z][a-z]+)*,?\s+(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b/.test(location||''))&&!/\bCanada|Europe|United Kingdom|Australia\b/i.test(location||'');
 const otherPeriod=/\b(?:hourly|monthly|weekly|daily|CAD|AUD|GBP|EUR)\b|per\s+(?:hour|month|week|day)\b/i;
+function separatedUsSalaryBand(raw) {
+ if(!/salary band in U\.S\. \(USD\)/i.test(raw))return null;
+ const description=htmlText(htmlText(String(raw)));
+ const lines=description.split(/\n+/).map(line=>line.replace(/\s+/g,' ').trim());
+ const bands=lines.filter(line=>/\bsalary band in U\.S\. \(USD\)/i.test(line));
+ if(bands.length!==1 || !/\bbase salary,\s*(?:meaningful\s+)?equity\b/i.test(description) ||
+    !/\bfull[- ]time U\.S\. employees\b/i.test(description) ||
+    /\b(?:part[- ]time|hourly|temporary position|contract (?:role|position))\b/i.test(description))return null;
+ // This employer format states the cash band, equity and benefits as separate addends.
+ // Matching the whole line excludes OTE, other periods, currencies and geographic qualifiers.
+ const match=/^salary band in U\.S\. \(USD\)\s*:\s*\$(\d{1,3}(?:,\d{3})+|\d+)\s*[-–—]\s*\$(\d{1,3}(?:,\d{3})+|\d+)\s*\+\s*(?:meaningful\s+)?(?:early[- ]stage\s+)?equity\s*\+\s*benefits\.?$/i.exec(bands[0]);
+ if(!match)return null;
+ const min=Number(match[1].replaceAll(',','')),max=Number(match[2].replaceAll(',',''));
+ if(!Number.isSafeInteger(min)||!Number.isSafeInteger(max)||min<1000||max<min)return null;
+ return {min,max,currency:'USD',interval:'year',periodAssumed:true,
+  evidence:bands[0]+' — employer separately describes base salary and equity for full-time U.S. employees; applicant-authorized annual-period assumption'};
+}
 export function salaryFromText(raw,{allowAnnualBaseAssumption=false,location}={}) {
  const text=String(raw).replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/<[^>]*>/g,' ').replace(/&nbsp;|&#160;/g,' ').replace(/&(?:amp;)?mdash;/g,'—').replace(/&(?:amp;)?ndash;/g,'–').replace(/&#36;|&dollar;/g,'$').replace(/\s+/g,' ');
  const assumption=allowAnnualBaseAssumption===true&&usLocation(location);
  const m=text.match(/(?:annual\s+)?base\s+(?:salary|pay|compensation)[^.]{0,90}?\$([\d,]+(?:\.\d+)?)(k?)\s*(?:-|–|—|to)\s*\$?([\d,]+(?:\.\d+)?)(k?)\b/i)|| (assumption?text.match(/\$([\d,]+(?:\.\d+)?)(k?)\s*(?:-|–|—|to)\s*\$?([\d,]+(?:\.\d+)?)(k?)\s+base\s+(?:salary|pay|compensation)/i):null);
- if(!m)return null;const context=text.slice(Math.max(0,m.index-50),m.index+m[0].length+90);
+ if(!m)return assumption ? separatedUsSalaryBand(raw) : null;const context=text.slice(Math.max(0,m.index-50),m.index+m[0].length+90);
  if(mixedCompensation(m[0].split('$')[0],text.slice(m.index+m[0].length)))return null;
  const annual=/\b(annual|annually|per year|yearly|a year)\b/i.test(context);
  if((!annual&&!assumption)||otherPeriod.test(context))return null;
@@ -66,6 +83,7 @@ export async function fetchBoard(board, fetcher = fetch) {
   const jobs = rows.filter(j => board.type !== 'ashby' || j?.isListed !== false).map(j => ({
     company: board.company, title: j.title || j.text || '',
     location: listingLocation(board.type==='ashby'?ashbyLocation(j):typeof j.location === 'string' ? j.location : j.location?.name || j.categories?.location || '',j.descriptionPlain || j.content || j.descriptionHtml || j.description),
+    ...(board.type==='ashby' && j.secondaryLocations?.length ? {locationOptions:[j.location,...j.secondaryLocations.map(option=>option.location)]} : {}),
     url: employerPostingUrl(board.type,j.absolute_url || j.hostedUrl || j.jobUrl,j.id),
     source: `${board.type}/${board.slug}`, seenAt,
     description: j.content || j.descriptionPlain || j.descriptionHtml || j.description || '',

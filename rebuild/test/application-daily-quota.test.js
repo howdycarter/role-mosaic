@@ -44,7 +44,7 @@ async function midnightFixture(t) {
     confirm: async () => ({ confirmed: true, posting: job.url, text: 'Application received' }) };
   const plan = await prepareApplications({ home, adapter, now });
   assert.equal(plan.packets.length, 1, JSON.stringify(plan.held));
-  const run = async resumeAttemptId => (await runApplications({ home, adapter, now, resumeAttemptId }))[0];
+  const run = async (resumeAttemptId, shouldContinue) => (await runApplications({ home, adapter, now, resumeAttemptId, shouldContinue }))[0];
   return { clock, store, run, adapter, dispatches };
 }
 
@@ -97,5 +97,14 @@ test('a recorded final action takes precedence over a historical attempt creatio
   await store.write('application-ledger.json', [{ id: 'older', day: '2026-11-09', status: 'submitted',
     finalActionAt: after, createdAt: before }]);
   assert.equal((await run()).status, 'daily_limit');
+  assert.deepEqual(dispatches, []);
+});
+
+test('a campaign that ends during the final checkpoint leaves the draft held', async t => {
+  const { clock, adapter, run, dispatches } = await midnightFixture(t);
+  adapter.captureVerificationCheckpoint = async () => { clock.time = after; };
+  const result = await run(undefined, () => clock.time === before);
+  assert.equal(result.status, 'held');
+  assert.equal(result.finalActionAt, undefined);
   assert.deepEqual(dispatches, []);
 });

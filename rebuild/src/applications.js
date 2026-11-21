@@ -352,7 +352,7 @@ export async function prepareApplications({home,adapter,limit=15,jobIds,restartA
   if(!inspection.titleVerified||inspection.closed||inspection.login){clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,url:job.url,reason:inspection.closed?'Employer closed the posting':inspection.login?'Employer sign-in required':'Employer title differs from the posting',needsApplicantInput:!inspection.closed && !!inspection.login});continue;}
   const pay=inspectionSalary(inspection,ctx.profile.facts.stateCode);
   const fit=evaluate({...job,location:inspection.location,compensation:pay},ctx.search);
-  if(fit.disposition!=='match'){clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,reason:fit.reasons.join('; ')});continue;}
+  if(fit.disposition!=='match'){clearedQuestions.push(job);held.push({id:job.id,company:job.company,title:job.title,reason:fit.reasons.join('; '),needsApplicantInput:false});continue;}
   const plan=await applicationFillPlan(store,job,inspection.form,ctx,adapter);
   if(plan.missing.length){
    if(adapter.transport==='playwright'&&!restartAuthorizationId){
@@ -481,6 +481,11 @@ export async function runApplications({home,adapter,now=()=>new Date(),limit=15,
     // tab can cross local midnight after the initial quota check.
     const finalHistory=await store.read('history.json',[]);
     do{
+     if(!await shouldContinue()){
+      attempt.status='held';attempt.reason='Worker paused before submission';
+      delete attempt.finalActionAt;
+      await save();break;
+     }
      const activation=now(),finalDay=dayAt(activation,current.policy.timezone);
      if(dailyQuotaReached(current.policy,finalHistory,currentAttempts,finalDay,attempt.id)){
       attempt.status='held';attempt.reason='Daily submission limit reached before final submission';

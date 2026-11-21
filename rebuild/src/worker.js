@@ -102,11 +102,14 @@ export class MosaicWorker {
  async config(){const c={...workerDefaults,...await this.store.read('worker.json',{})};if(!Number.isFinite(c.intervalMinutes)||c.intervalMinutes<1||c.intervalMinutes>1440||!Number.isInteger(c.maxInspections)||c.maxInspections<1||c.maxInspections>30||!['chrome','chromium'].includes(c.channel))throw Error('Invalid worker configuration');return c;}
  async browser(){if(!this.adapter){if(!this.adapterPromise)this.adapterPromise=this.config().then(c=>this.adapterFactory(c));try{this.adapter=await this.adapterPromise;}finally{this.adapterPromise=null;}}return this.adapter;}
  async persist(){await this.store.write('worker-state.json',this.status);}
- async canContinue(){this.status.campaign=await campaignProgress({home:this.home});return !this.paused&&!this.status.campaign.complete;}
+ async canContinue(){this.status.campaign=await campaignProgress({home:this.home});return !this.paused&&!this.status.campaign.complete&&!this.status.campaign.expired;}
  async stopAtTarget(){
   this.status.campaign=await campaignProgress({home:this.home});
-  if(!this.status.campaign.complete)return false;
-  await this.pause();this.status.state='complete';this.status.stage='campaign target reached';return true;
+  if(!this.status.campaign.complete&&!this.status.campaign.expired)return false;
+  await this.pause();
+  this.status.state=this.status.campaign.complete?'complete':'paused';
+  this.status.stage=this.status.campaign.complete?'campaign target reached':'campaign ended';
+  return true;
  }
  async start(){const c=await this.config();this.paused=false;await this.store.write('worker.json',{...c,enabled:true});clearInterval(this.timer);this.timer=setInterval(()=>{this.cycle().catch(()=>{});},c.intervalMinutes*60000);this.timer.unref?.();this.status.state='idle';await this.persist();return this.cycle();}
  async pause(){this.pauseRevision++;this.paused=true;clearInterval(this.timer);this.timer=null;await this.store.write('worker.json',{...await this.config(),enabled:false});this.status.pauseRequested=this.running;this.status.state=this.running?'pausing':'paused';await this.persist();return this.status;}

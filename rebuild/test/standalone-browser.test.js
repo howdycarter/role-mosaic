@@ -87,6 +87,29 @@ test('the live inspection keeps a location constraint from either the API or the
  }finally{await browser.close();await rm(root,{recursive:true,force:true});}
 });
 
+test('Ashby matches a nationwide option only when the full location list agrees with the posting API',{skip:process.env.MOSAIC_BROWSER_TESTS!=='1'},async()=>{
+ const {chromium}=await import('playwright');
+ const root=await mkdtemp(path.join(os.tmpdir(),'mosaic-ashby-options-'));
+ const browser=await chromium.launch({headless:true,channel:process.env.MOSAIC_TEST_CHANNEL||undefined,chromiumSandbox:true}),context=await browser.newContext();
+ try{
+  const options=['Remote - United States','San Mateo, California','North America | Texas'];
+  const list='Remote - United States; North America | Texas; San Mateo, California';
+  const cases=[
+   {line:list,expected:'Remote, United States'},
+   {line:'Remote - United States; North America | Texas',expected:'Remote - United States; North America | Texas'},
+   {line:list,description:'Applicants must reside in California.',expected:'Location restrictions require review'},
+   {line:'Remote - United States; California only',options:['Remote - United States','California only'],expected:'Remote - United States; California only'},
+  ];
+  for(const [n,testCase] of cases.entries()){
+   const url='https://jobs.ashbyhq.com/example/12345678-1234-1234-1234-'+String(n).padStart(12,'0');
+   await context.route(url,route=>route.fulfill({contentType:'text/html',body:'<h1>Director of Product</h1><p>Location</p><p>'+testCase.line+'</p><p>Location Type</p><p>Remote</p><p>'+(testCase.description||'')+'</p>'}));
+   const adapter=new PlaywrightApplicationAdapter(context,{home:root,evidenceLoader:async()=>({title:'Director of Product',posting:url,location:'Remote, United States',locationOptions:testCase.options||options,sourceUrl:'https://api.ashbyhq.com/posting-api/job-board/example?includeCompensation=true'})});
+   const inspection=await adapter.inspect({id:String(n),title:'Director of Product',url});
+   assert.equal(inspection.location,testCase.expected);
+  }
+ }finally{await browser.close();await rm(root,{recursive:true,force:true});}
+});
+
 test('anonymous Ashby location autocomplete inherits its required label and uses an observed selector',{skip:process.env.MOSAIC_BROWSER_TESTS!=='1'},async()=>{
  const {chromium}=await import('playwright');const root=await mkdtemp(path.join(os.tmpdir(),'mosaic-location-widget-'));const browser=await chromium.launch({headless:true,channel:process.env.MOSAIC_TEST_CHANNEL||undefined,chromiumSandbox:true}),context=await browser.newContext();
  try{

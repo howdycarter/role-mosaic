@@ -77,10 +77,10 @@ test('explicit overlapping salary bands preserve the applicant minimum and do no
 
 test('FDE is an opt-in target with scoped seniority and unchanged salary/location rules',()=>{
  const fde={...config,fdeTarget:{enabled:true,levels:['senior','staff','principal','lead','founding','director','head','vp'],includeUnspecifiedLevel:true}};
- for(const title of ['Senior Forward Deployed Engineer','Sr. Forward Deployed Engineer','Sr Forward Deployed Engineer','Staff Forward-Deployed Software Engineer','Principal FDE'])assert.equal(evaluate({...job,title},fde).disposition,'match',title);
+ for(const title of ['Senior Forward Deployed Engineer','Sr. Forward Deployed Engineer','Sr Forward Deployed Engineer','Staff Forward-Deployed Software Engineer','Senior Forward Deployment Engineer','Principal FDE'])assert.equal(evaluate({...job,title},fde).disposition,'match',title);
  assert.equal(evaluate({...job,title:'Forward Deployed Engineer'},fde).disposition,'review');
  assert.ok(evaluate({...job,title:'Forward Deployed Engineer'},fde).matches.levels.length);
- for(const title of ['Junior Forward Deployed Engineer','Jr. Forward Deployed Engineer','Forward Deployed Engineer Intern','Senior Software Engineer','Senior Deployment Strategist','Principal Technical Program Manager, Forward Deployed Engineering'])assert.equal(evaluate({...job,title},fde).disposition,'review',title);
+ for(const title of ['Junior Forward Deployed Engineer','Jr. Forward Deployed Engineer','Forward Deployed Engineer Intern','Senior Software Engineer','Senior Deployment Strategist','Director, Forward Deployment Marketing','Principal Technical Program Manager, Forward Deployed Engineering'])assert.equal(evaluate({...job,title},fde).disposition,'review',title);
  assert.equal(evaluate({...job,title:'Senior FDE'},config).disposition,'review');
  assert.equal(evaluate({...job,title:'Senior FDE',location:'Remote Europe'},fde).disposition,'review');
  assert.equal(evaluate({...job,title:'Senior FDE',compensation:{min:100000,currency:'USD',interval:'year'}},fde).disposition,'review');

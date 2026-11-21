@@ -5,3 +5,32 @@ const attempt={id:'one',url:'https://job-boards.greenhouse.io/example/jobs/123',
 test('campaign counts unique confirmed receipts, never unknowns or bare tracker statuses',async()=>{const f=await fixture();try{await f.store.write('application-ledger.json',[attempt,{...attempt,id:'duplicate'},{...attempt,id:'unknown',url:'https://job-boards.greenhouse.io/example/jobs/124',status:'submission_unknown'},{...attempt,id:'bare',url:'https://job-boards.greenhouse.io/example/jobs/125',receipt:null}]);const p=await campaignProgress(f);assert.equal(p.confirmed,1);assert.equal(p.unknown,1);assert.equal(p.remaining,1);assert.equal(p.complete,false);}finally{await f.close()}});
 test('campaign imported receipt is pinned and deduplicated against the ledger',async()=>{const f=await fixture();try{const record={status:'submitted',posting:attempt.url,recordedAt:attempt.createdAt,confirmation:'Your application was successfully submitted'};await f.store.write('imported.json',record);const bytes=JSON.stringify(record,null,2)+'\n';await f.store.write('campaign.json',{enabled:true,targetConfirmed:1,since:'2026-01-01T00:00:00Z',importedReceipts:[{file:'imported.json',sha256:digest(bytes),posting:attempt.url}]});await f.store.write('application-ledger.json',[attempt]);assert.equal((await campaignProgress(f)).confirmed,1);await f.store.write('imported.json',{...record,confirmation:'changed'});await assert.rejects(campaignProgress(f),/changed/);}finally{await f.close()}});
 test('worker stops its scheduler at target before discovery or opening a browser',async()=>{const f=await fixture();try{await f.store.write('campaign.json',{enabled:true,targetConfirmed:1,since:'2026-01-01T00:00:00Z'});await f.store.write('application-ledger.json',[attempt]);const w=new MosaicWorker({home:f.home,adapterFactory:async()=>{throw Error('must not open browser')},fetcher:async()=>{throw Error('must not discover')}});const result=await w.start();assert.equal(result.state,'complete');assert.equal(result.campaign.confirmed,1);assert.equal(w.timer,null);assert.equal((await f.store.read('worker.json')).enabled,false);}finally{await f.close()}});
+
+test('a time-limited campaign expires without counting receipts outside its window or starting the browser',async t=>{
+ const f=await fixture();t.after(f.close);
+ const endsAt='2026-01-03T00:00:00Z';
+ await f.store.write('campaign.json',{enabled:true,targetConfirmed:3,since:'2026-01-01T00:00:00Z',endsAt});
+ await f.store.write('application-ledger.json',[
+  attempt,
+  {...attempt,submittedAt:endsAt,url:'https://job-boards.greenhouse.io/example/jobs/345',
+   receipt:{...attempt.receipt,posting:'https://job-boards.greenhouse.io/example/jobs/345/confirmation'}},
+  {...attempt,status:'submission_unknown',finalActionAt:endsAt},
+ ]);
+ const before=await campaignProgress({...f,now:new Date('2026-01-02T23:59:59Z')});
+ assert.equal(before.expired,false);
+ const at=await campaignProgress({...f,now:new Date(endsAt)});
+ assert.equal(at.expired,true);assert.equal(at.complete,false);assert.equal(at.confirmed,1);assert.equal(at.unknown,0);
+ const worker=new MosaicWorker({home:f.home,adapterFactory:async()=>assert.fail('expired campaign must not use the browser')});
+ const result=await worker.start();
+ assert.equal(result.state,'paused');assert.equal(result.stage,'campaign ended');
+ assert.equal((await f.store.read('worker.json')).enabled,false);
+ assert.equal(await worker.canContinue(),false);
+});
+
+test('an invalid or empty campaign window fails closed',async t=>{
+ const f=await fixture();t.after(f.close);
+ for(const endsAt of ['bad','2026-01-01T00:00:00Z']){
+  await f.store.write('campaign.json',{enabled:true,targetConfirmed:1,since:'2026-01-01T00:00:00Z',endsAt});
+  await assert.rejects(campaignProgress(f),/end timestamp/);
+ }
+});
